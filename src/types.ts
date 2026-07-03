@@ -35,6 +35,8 @@ export interface WatermarkOptions {
   opacity: number;
   style: 'single' | 'grid';
   position: 'center' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+  rotation: number;
+  margin: number;
 }
 
 export interface QueueItem {

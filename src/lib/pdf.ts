@@ -60,20 +60,18 @@ export async function generatePDF(doc: Document, options?: { drawBorder?: boolea
     // Quality compression
     let imageData = sourceImageSrc;
     if (options?.quality && options.quality < 1) {
-       // Resize and compress on canvas
+       // compress on canvas
        const canvas = document.createElement('canvas');
-       // scale down dimensions
-       const scale = Math.max(options.quality, 0.5); // minimum scale 0.5
-       canvas.width = img.width * scale;
-       canvas.height = img.height * scale;
+       canvas.width = img.width;
+       canvas.height = img.height;
        const ctx = canvas.getContext('2d');
        if (ctx) {
-         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+         ctx.drawImage(img, 0, 0);
          imageData = canvas.toDataURL('image/jpeg', options.quality);
        }
     }
 
-    pdf.addImage(imageData, 'JPEG', x, y, renderWidth, renderHeight, undefined, options?.quality ? 'FAST' : 'MEDIUM');
+    pdf.addImage(imageData, 'JPEG', x, y, renderWidth, renderHeight, undefined, options?.quality && options.quality < 1 ? 'FAST' : 'MEDIUM');
     
     if (options?.drawBorder) {
        pdf.setDrawColor(0, 0, 0); // black

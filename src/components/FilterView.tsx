@@ -8,9 +8,10 @@ interface FilterViewProps {
   initialFilter?: FilterType;
   onSave: (filteredImage: string, filterType: FilterType) => void;
   onBack: () => void;
+  isSaving?: boolean;
 }
 
-export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, onBack }: FilterViewProps) {
+export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, onBack, isSaving }: FilterViewProps) {
   const [filter, setFilter] = useState<FilterType>(initialFilter);
   const [previewImage, setPreviewImage] = useState<string>(imageSrc);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -54,6 +55,7 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
   }, [imageSrc, filter, rotation, brightness, contrast]);
 
   const handleSave = () => {
+    if (isProcessing || isSaving) return;
     onSave(previewImage, filter);
   };
 
@@ -76,8 +78,12 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
           <ChevronLeft className="w-6 h-6" />
         </button>
         <h2 className="text-lg font-medium">Fine Tuning</h2>
-        <button onClick={handleSave} className="p-2 -mr-2 text-blue-400 font-medium" disabled={isProcessing}>
-          <Check className="w-6 h-6" />
+        <button onClick={handleSave} className="p-2 -mr-2 text-blue-400 font-medium" disabled={isProcessing || isSaving}>
+          {isSaving ? (
+             <div className="w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
+          ) : (
+             <Check className="w-6 h-6" />
+          )}
         </button>
       </div>
       

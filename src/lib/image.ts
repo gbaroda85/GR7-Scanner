@@ -1487,46 +1487,44 @@ export async function addWatermarkToImage(imageSrc: string, watermark: Watermark
   const text = watermark.text.trim();
 
   if (watermark.style === 'grid') {
-    // 3x3 Grid
-    const colWidth = img.width / 3;
-    const rowHeight = img.height / 3;
+    // 3x3 Grid with margin
+    const m = watermark.margin || 20;
+    const colWidth = (img.width - 2 * m) / 3;
+    const rowHeight = (img.height - 2 * m) / 3;
     for (let r = 0; r < 3; r++) {
       for (let c = 0; c < 3; c++) {
-        const x = colWidth * c + colWidth / 2;
-        const y = rowHeight * r + rowHeight / 2;
+        const x = m + colWidth * c + colWidth / 2;
+        const y = m + rowHeight * r + rowHeight / 2;
         ctx.save();
         ctx.translate(x, y);
-        ctx.rotate(-Math.PI / 6); // slight rotation for stylish look
+        ctx.rotate((watermark.rotation ?? 0) * Math.PI / 180);
         ctx.fillText(text, 0, 0);
         ctx.restore();
       }
     }
   } else {
-    // Single position
+    // Single position with margin
     const pos = watermark.position || 'center';
+    const m = watermark.margin || 20;
     let x = img.width / 2;
     let y = img.height / 2;
-    let rotateAngle = -Math.PI / 6; // Center gets nice rotation
+    let rotateAngle = (watermark.rotation ?? 0) * Math.PI / 180;
 
     if (pos === 'top-left') {
-      x = img.width * 0.15;
-      y = img.height * 0.1;
-      rotateAngle = 0;
+      x = m + fontSize;
+      y = m + fontSize;
       ctx.textAlign = 'left';
     } else if (pos === 'top-right') {
-      x = img.width * 0.85;
-      y = img.height * 0.1;
-      rotateAngle = 0;
+      x = img.width - m - fontSize;
+      y = m + fontSize;
       ctx.textAlign = 'right';
     } else if (pos === 'bottom-left') {
-      x = img.width * 0.15;
-      y = img.height * 0.9;
-      rotateAngle = 0;
+      x = m + fontSize;
+      y = img.height - m - fontSize;
       ctx.textAlign = 'left';
     } else if (pos === 'bottom-right') {
-      x = img.width * 0.85;
-      y = img.height * 0.9;
-      rotateAngle = 0;
+      x = img.width - m - fontSize;
+      y = img.height - m - fontSize;
       ctx.textAlign = 'right';
     }
 

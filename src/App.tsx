@@ -101,6 +101,8 @@ export default function App() {
   const [watermarkOpacity, setWatermarkOpacity] = useState<number>(0.3);
   const [watermarkStyle, setWatermarkStyle] = useState<'single' | 'grid'>('single');
   const [watermarkPosition, setWatermarkPosition] = useState<'center' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'>('center');
+  const [watermarkRotation, setWatermarkRotation] = useState<number>(0);
+  const [watermarkMargin, setWatermarkMargin] = useState<number>(20);
 
   // Notes state
   const [noteSearchQuery, setNoteSearchQuery] = useState('');
@@ -361,28 +363,41 @@ export default function App() {
                       <Share2 className="w-4 h-4 mr-3 text-gray-400" /> Export & Share
                     </button>
 
-                    <button 
-                      onClick={(e) => { 
-                        e.stopPropagation(); 
-                        setShowFolderSelectFor(doc.id); 
-                        setActiveMenuDocId(null);
-                      }} 
-                      className={`w-full text-left px-5 py-3 text-sm font-medium flex items-center transition-colors ${theme === 'dark' ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-gray-50 text-gray-700'}`}
-                    >
-                      <FolderOpen className="w-4 h-4 mr-3 text-gray-400" /> Move to Folder
-                    </button>
+                    {doc.isTrash ? (
+                      <button 
+                        onClick={(e) => { 
+                          e.stopPropagation(); 
+                          handleRestoreDoc(doc.id); 
+                          setActiveMenuDocId(null);
+                        }} 
+                        className={`w-full text-left px-5 py-3 text-sm font-medium flex items-center transition-colors ${theme === 'dark' ? 'hover:bg-slate-800 text-blue-400' : 'hover:bg-blue-50 text-blue-600'}`}
+                      >
+                        <Undo className="w-4 h-4 mr-3" /> Restore from Trash
+                      </button>
+                    ) : (
+                      <button 
+                        onClick={(e) => { 
+                          e.stopPropagation(); 
+                          setShowFolderSelectFor(doc.id); 
+                          setActiveMenuDocId(null);
+                        }} 
+                        className={`w-full text-left px-5 py-3 text-sm font-medium flex items-center transition-colors ${theme === 'dark' ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-gray-50 text-gray-700'}`}
+                      >
+                        <FolderOpen className="w-4 h-4 mr-3 text-gray-400" /> Move to Folder
+                      </button>
+                    )}
 
                     <div className={`my-1 border-t ${theme === 'dark' ? 'border-slate-800' : 'border-gray-100'}`} />
 
                     <button 
                       onClick={(e) => { 
                         e.stopPropagation(); 
-                        deleteDocument(doc.id).then(getDocuments).then(setDocuments); 
+                        handleDeleteDoc(doc.id);
                         setActiveMenuDocId(null); 
                       }} 
                       className={`w-full text-left px-5 py-3 text-sm font-medium flex items-center text-red-600 transition-colors ${theme === 'dark' ? 'hover:bg-red-950/30' : 'hover:bg-red-50'}`}
                     >
-                      <Trash2 className="w-4 h-4 mr-3 text-red-500" /> Delete
+                      <Trash2 className="w-4 h-4 mr-3 text-red-500" /> {doc.isTrash ? 'Delete Permanently' : 'Move to Trash'}
                     </button>
                   </div>
                 </motion.div>
@@ -403,7 +418,14 @@ export default function App() {
 
   const filteredDocs = useMemo(() => {
     const isTrashMode = activeFolderFilter === 'trash';
-    const baseDocs = documents.filter(d => isTrashMode ? d.isTrash : !d.isTrash);
+    const baseDocs = documents.filter(d => {
+      if (isTrashMode) return !!d.isTrash;
+      if (d.isTrash) return false;
+      
+      if (activeFolderFilter === 'all') return true;
+      if (activeFolderFilter === 'root' || activeFolderFilter === 'uncategorized') return !d.folderId;
+      return d.folderId === activeFolderFilter;
+    });
     
     if (!searchQuery.trim()) return baseDocs;
     const q = searchQuery.toLowerCase().trim();
@@ -524,51 +546,68 @@ export default function App() {
   const handleFilterSave = async (filtered: string, filter: FilterType) => {
     if (!capturedImage || !croppedImage || !currentCorners) return;
     
-    const newPage: DocumentPage = {
-      id: editingPageId || Date.now().toString(),
-      originalImage: capturedImage,
-      croppedImage: croppedImage,
-      filteredImage: filtered,
-      filter: filter,
-      corners: currentCorners
-    };
+    setIsProcessingStep(true);
+    setErrorMessage(null);
     
-    let docToUpdate = currentDoc;
-    if (!docToUpdate) {
-      docToUpdate = {
-        id: Date.now().toString(),
-        title: `Scan ${new Date().toLocaleDateString()}`,
-        createdAt: Date.now(),
-        pages: []
+    try {
+      const newPage: DocumentPage = {
+        id: editingPageId || Date.now().toString(),
+        originalImage: capturedImage,
+        croppedImage: croppedImage,
+        filteredImage: filtered,
+        filter: filter,
+        corners: currentCorners
       };
-    }
-    
-    docToUpdate = {
-      ...docToUpdate,
-      pages: editingPageId 
-        ? docToUpdate.pages.map(p => p.id === editingPageId ? newPage : p)
-        : [...docToUpdate.pages, newPage]
-    };
-    
-    setEditingPageId(null);
-    
-    await saveDocument(docToUpdate);
-    const freshDocs = await getDocuments();
-    setDocuments(freshDocs);
-    setCurrentDoc(docToUpdate);
-    
-    if (processingQueue.length > 0) {
-       const nextItem = processingQueue[0];
-       setCapturedImage(nextItem.url);
-       setProcessingQueue(processingQueue.slice(1));
-       setCroppedImage(null);
-       setCurrentCorners(nextItem.corners || undefined);
-       setAppState('crop');
-    } else {
-       setCapturedImage(null);
-       setCroppedImage(null);
-       setCurrentCorners(undefined);
-       setAppState('view_doc');
+      
+      let docToUpdate = currentDoc;
+      let isNewDoc = false;
+      if (!docToUpdate) {
+        isNewDoc = true;
+        docToUpdate = {
+          id: Date.now().toString(),
+          title: `Scan ${new Date().toLocaleDateString()}`,
+          createdAt: Date.now(),
+          pages: [],
+          folderId: (activeFolderFilter !== 'all' && activeFolderFilter !== 'trash' && activeFolderFilter !== 'root' && activeFolderFilter !== 'uncategorized') ? activeFolderFilter : undefined
+        };
+      }
+      
+      const updatedDoc = {
+        ...docToUpdate,
+        pages: editingPageId 
+          ? docToUpdate.pages.map(p => p.id === editingPageId ? newPage : p)
+          : [...docToUpdate.pages, newPage]
+      };
+      
+      // Save to database
+      await saveDocument(updatedDoc);
+      
+      // Refresh documents from store to ensure consistency
+      const freshDocs = await getDocuments();
+      setDocuments(freshDocs);
+      
+      setEditingPageId(null);
+      setCurrentDoc(updatedDoc);
+      
+      if (processingQueue.length > 0) {
+         const nextItem = processingQueue[0];
+         setCapturedImage(nextItem.url);
+         setProcessingQueue(processingQueue.slice(1));
+         setCroppedImage(null);
+         setCurrentCorners(nextItem.corners || undefined);
+         setAppState('crop');
+      } else {
+         setCapturedImage(null);
+         setCroppedImage(null);
+         setCurrentCorners(undefined);
+         setAppState('view_doc');
+      }
+    } catch (err: any) {
+      console.error("Save error:", err);
+      setErrorMessage("Could not save the document. Storage might be full or inaccessible.");
+      // Don't change appState, let the user try again
+    } finally {
+      setIsProcessingStep(false);
     }
   };
 
@@ -608,25 +647,47 @@ export default function App() {
     }
   };
 
+  const handleRestoreDoc = async (id: string) => {
+    const doc = documents.find(d => d.id === id);
+    if (!doc) return;
+
+    try {
+      const updatedDoc = { ...doc, isTrash: false };
+      await saveDocument(updatedDoc);
+      
+      const freshDocs = await getDocuments();
+      setDocuments(freshDocs);
+      setCurrentDoc(updatedDoc);
+    } catch (err) {
+      console.error("Restore error:", err);
+      setErrorMessage("Failed to restore document.");
+    }
+  };
+
   const handleDeleteDoc = async (id: string) => {
     const doc = documents.find(d => d.id === id);
     if (!doc) return;
 
-    if (doc.isTrash) {
-      const confirmDelete = await showCustomConfirm(`Are you sure you want to permanently delete "${doc.title}"? This action cannot be undone.`);
-      if (!confirmDelete) return;
-      await deleteDocument(id);
-    } else {
-      const confirmTrash = await showCustomConfirm(`Move "${doc.title}" to Trash?`);
-      if (!confirmTrash) return;
-      const updatedDoc = { ...doc, isTrash: true };
-      await saveDocument(updatedDoc);
+    try {
+      if (doc.isTrash) {
+        const confirmDelete = await showCustomConfirm(`Are you sure you want to permanently delete "${doc.title}"? This action cannot be undone.`);
+        if (!confirmDelete) return;
+        await deleteDocument(id);
+        setDocuments(prev => prev.filter(d => d.id !== id));
+      } else {
+        const confirmTrash = await showCustomConfirm(`Move "${doc.title}" to Trash?`);
+        if (!confirmTrash) return;
+        const updatedDoc = { ...doc, isTrash: true };
+        await saveDocument(updatedDoc);
+        setDocuments(prev => prev.map(d => d.id === id ? updatedDoc : d));
+      }
+      
+      setAppState('home');
+      setCurrentDoc(null);
+    } catch (err) {
+      console.error("Delete/Trash error:", err);
+      setErrorMessage("Operation failed. Storage might be full.");
     }
-    
-    const freshDocs = await getDocuments();
-    setDocuments(freshDocs);
-    setAppState('home');
-    setCurrentDoc(null);
   };
 
   const handleDeletePage = async (doc: Document, pageIndex: number) => {
@@ -643,26 +704,39 @@ export default function App() {
       const updatedPages = [...doc.pages];
       updatedPages.splice(pageIndex, 1);
       const updatedDoc = { ...doc, pages: updatedPages };
-      await saveDocument(updatedDoc);
-      const freshDocs = await getDocuments();
-      setDocuments(freshDocs);
-      setCurrentDoc(updatedDoc);
+      try {
+        await saveDocument(updatedDoc);
+        setDocuments(prev => prev.map(d => d.id === updatedDoc.id ? updatedDoc : d));
+        if (currentDoc?.id === updatedDoc.id) {
+          setCurrentDoc(updatedDoc);
+        }
+      } catch (err) {
+        console.error("Delete page error:", err);
+        setErrorMessage("Failed to delete page. Storage issue.");
+      }
     }
   };
 
   const handleRenameSave = async () => {
     if (!currentDoc || !tempTitle.trim()) return;
     
-    const updatedDoc = {
-      ...currentDoc,
-      title: tempTitle.trim()
-    };
-    
-    await saveDocument(updatedDoc);
-    const freshDocs = await getDocuments();
-    setDocuments(freshDocs);
-    setCurrentDoc(updatedDoc);
-    setIsEditingTitle(false);
+    setIsProcessingStep(true);
+    try {
+      const updatedDoc = {
+        ...currentDoc,
+        title: tempTitle.trim()
+      };
+      
+      await saveDocument(updatedDoc);
+      setCurrentDoc(updatedDoc);
+      setDocuments(prev => prev.map(d => d.id === updatedDoc.id ? updatedDoc : d));
+      setIsEditingTitle(false);
+    } catch (err: any) {
+      console.error("Rename error:", err);
+      setErrorMessage("Failed to rename document. Storage might be full.");
+    } finally {
+      setIsProcessingStep(false);
+    }
   };
 
   const handleReorderPages = async (fromIdx: number, toIdx: number) => {
@@ -676,10 +750,14 @@ export default function App() {
       pages
     };
     
-    await saveDocument(updatedDoc);
-    const freshDocs = await getDocuments();
-    setDocuments(freshDocs);
-    setCurrentDoc(updatedDoc);
+    try {
+      await saveDocument(updatedDoc);
+      setDocuments(prev => prev.map(d => d.id === updatedDoc.id ? updatedDoc : d));
+      setCurrentDoc(updatedDoc);
+    } catch (err) {
+      console.error("Reorder error:", err);
+      setErrorMessage("Failed to reorder pages. Storage issue.");
+    }
   };
 
   const handleMovePage = (idx: number, direction: 'up' | 'down') => {
@@ -761,6 +839,8 @@ export default function App() {
       opacity: watermarkOpacity,
       style: watermarkStyle,
       position: watermarkPosition,
+      rotation: watermarkRotation,
+      margin: watermarkMargin,
     } : undefined;
 
     if (exportFormat === 'pdf') {
@@ -784,8 +864,25 @@ export default function App() {
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
         } else if (action === 'email') {
+          // Check if we can share with files (preferred for attachments)
+          if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+            try {
+              await navigator.share({
+                files: [file],
+                title: doc.title,
+                text: `Please find attached the scanned PDF document "${doc.title}".`
+              });
+              setAppState('home');
+              setShowExportModalFor(null);
+              return;
+            } catch (shareErr) {
+              console.warn("Share via email failed, falling back:", shareErr);
+            }
+          }
+
+          // Fallback to mailto + download
           const subject = encodeURIComponent(`Scanned Document: ${doc.title}`);
-          const body = encodeURIComponent(`Please find attached the scanned PDF document "${doc.title}".\n\nSent from Mobile PDF Scanner & Creator.`);
+          const body = encodeURIComponent(`I have scanned a document for you: "${doc.title}".\n\nNote: The PDF has been downloaded to my device because standard email links don't support attachments directly. I am attaching it manually now.\n\nSent from Mobile PDF Scanner & Creator.`);
           window.location.href = `mailto:?subject=${subject}&body=${body}`;
 
           // Also download for easy attachment
@@ -797,6 +894,8 @@ export default function App() {
           a.click();
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
+          
+          showCustomAlert("Email App Opened: Standard email links cannot attach files automatically. The PDF has been downloaded to your device so you can attach it to the email manually.");
         } else {
           try {
             if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -956,6 +1055,18 @@ export default function App() {
     setActiveMenuDocId(null);
   };
 
+  const handleRestoreSelected = async () => {
+    const docsToProcess = Array.from(selectedDocs).map(id => documents.find(d => d.id === id)).filter(Boolean) as Document[];
+    if (docsToProcess.length === 0) return;
+
+    await Promise.all(docsToProcess.map(d => saveDocument({ ...d, isTrash: false })));
+    
+    const freshDocs = await getDocuments();
+    setDocuments(freshDocs);
+    setSelectedDocs(new Set());
+    setIsMultiSelect(false);
+  };
+
   const handleDeleteSelected = async () => {
     const docsToProcess = Array.from(selectedDocs).map(id => documents.find(d => d.id === id)).filter(Boolean) as Document[];
     if (docsToProcess.length === 0) return;
@@ -1078,6 +1189,7 @@ export default function App() {
        .filter(d => selectedDocs.has(d.id))
        .map(async d => {
           d.folderId = folderId;
+          d.isTrash = false; // Recover if in trash
           await saveDocument(d);
        });
        
@@ -1087,6 +1199,284 @@ export default function App() {
     setSelectedDocs(new Set());
     setIsMultiSelect(false);
     setShowMultiFolderSelect(false);
+  };
+
+  const renderExportModal = () => {
+    if (!showExportModalFor) return null;
+    const doc = documents.find(d => d.id === showExportModalFor);
+    if (!doc) return null;
+    return (
+      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div className={`w-full max-w-md rounded-2xl p-6 max-h-[85vh] overflow-y-auto ${theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-gray-900'} shadow-2xl border ${theme === 'dark' ? 'border-slate-800' : 'border-gray-100'}`}>
+          <h3 className="font-bold text-xl mb-4">Export Options</h3>
+          <div className="space-y-5">
+            
+            <div>
+              <label className="block text-sm font-medium mb-2">Format</label>
+              <div className="flex bg-gray-100 rounded-lg p-1 dark:bg-slate-800">
+                <button 
+                  onClick={() => setExportFormat('pdf')} 
+                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'pdf' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
+                >
+                  PDF
+                </button>
+                <button 
+                  onClick={() => setExportFormat('images')} 
+                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'images' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
+                >
+                  Images
+                </button>
+                <button 
+                  onClick={() => setExportFormat('zip')} 
+                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'zip' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
+                >
+                  ZIP
+                </button>
+              </div>
+            </div>
+
+            {exportFormat === 'pdf' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium mb-2">Size / Quality</label>
+                  <select 
+                    value={exportQuality} 
+                    onChange={(e) => setExportQuality(Number(e.target.value))}
+                    className={`w-full p-2.5 rounded-xl border text-sm focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-gray-50 border-gray-200'}`}
+                  >
+                    <option value={1}>Original Quality (~Max Size)</option>
+                    <option value={0.75}>High Quality (~75% Size)</option>
+                    <option value={0.5}>Medium Quality (~50% Size)</option>
+                    <option value={0.3}>Low Quality (Smallest Size)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Password Protection <span className="text-xs text-gray-500 font-normal">(Optional)</span></label>
+                  <input 
+                    type="password" 
+                    placeholder="Leave blank for no password" 
+                    value={exportPassword}
+                    onChange={(e) => setExportPassword(e.target.value)}
+                    className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 placeholder-slate-500' : 'bg-gray-50 border-gray-200'}`}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Watermark Section */}
+            <div className="border-t pt-4 border-gray-100 dark:border-slate-800">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-sm font-semibold flex items-center">
+                  <span className="mr-1.5 text-base">🛡️</span> Watermark Document
+                </label>
+                <label className="relative inline-flex items-center cursor-pointer select-none">
+                  <input 
+                    type="checkbox" 
+                    checked={watermarkEnabled} 
+                    onChange={(e) => setWatermarkEnabled(e.target.checked)} 
+                    className="sr-only peer"
+                  />
+                  <div className={`w-9 h-5 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:border after:rounded-full after:h-4 after:w-4 after:transition-all ${theme === 'dark' ? 'bg-slate-700 border-slate-600 after:bg-slate-300 after:border-slate-500 peer-checked:bg-blue-500' : 'bg-gray-200 after:bg-white after:border-gray-300 peer-checked:bg-blue-600'}`}></div>
+                </label>
+              </div>
+
+              {watermarkEnabled && (
+                <div className={`space-y-3 p-3.5 rounded-xl border text-xs ${theme === 'dark' ? 'bg-slate-800/40 border-slate-800/80' : 'bg-gray-50 border-gray-100'}`}>
+                  {/* Miniature Preview Area */}
+                    <div className={`mb-4`}>
+                      <label className="block font-semibold mb-2 text-[10px] opacity-70 uppercase tracking-wider">Live Preview</label>
+                      <div className={`relative h-40 w-28 mx-auto rounded-sm shadow-md overflow-hidden flex items-center justify-center border transition-colors ${theme === 'dark' ? 'bg-slate-900 border-slate-700' : 'bg-white border-gray-200'}`}>
+                        <div className={`absolute inset-0 flex items-center justify-center pointer-events-none opacity-5 font-bold text-[8px] uppercase tracking-widest ${theme === 'dark' ? 'text-white' : 'text-black'}`}>
+                          Document Page
+                        </div>
+                        
+                        {watermarkStyle === 'grid' ? (
+                          <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 gap-1 p-2 pointer-events-none">
+                            {[...Array(9)].map((_, i) => (
+                              <div key={i} className="flex items-center justify-center">
+                                <span 
+                                  style={{ 
+                                    color: watermarkColor, 
+                                    opacity: watermarkOpacity,
+                                    fontSize: `${watermarkSize * 0.15}px`,
+                                    transform: `rotate(${watermarkRotation}deg)`,
+                                  }}
+                                  className="font-bold select-none break-all text-center leading-none"
+                                >
+                                  {watermarkText || 'SAMPLE'}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div 
+                            className={`absolute inset-0 flex pointer-events-none ${
+                              watermarkPosition === 'center' ? 'items-center justify-center' :
+                              watermarkPosition === 'top-left' ? 'items-start justify-start' :
+                              watermarkPosition === 'top-right' ? 'items-start justify-end' :
+                              watermarkPosition === 'bottom-left' ? 'items-end justify-start' :
+                              'items-end justify-end' // bottom-right
+                            }`}
+                            style={{ padding: `${watermarkMargin * 0.1}px` }}
+                          >
+                            <span 
+                              style={{ 
+                                color: watermarkColor, 
+                                opacity: watermarkOpacity,
+                                fontSize: `${watermarkSize * 0.3}px`,
+                                transform: `rotate(${watermarkRotation}deg)`,
+                                textAlign: watermarkPosition.includes('left') ? 'left' : (watermarkPosition.includes('right') ? 'right' : 'center')
+                              }}
+                              className="font-bold select-none break-all leading-tight"
+                            >
+                              {watermarkText || 'SAMPLE'}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                  <div>
+                    <label className="block font-semibold mb-1">Watermark Text</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. CONFIDENTIAL, DRAFT" 
+                      value={watermarkText}
+                      onChange={(e) => setWatermarkText(e.target.value)}
+                      className={`w-full px-3 py-2 rounded-lg border text-xs focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 placeholder-slate-500 text-white' : 'bg-white border-gray-200'}`}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block font-semibold mb-1">Style</label>
+                      <select 
+                        value={watermarkStyle}
+                        onChange={(e) => setWatermarkStyle(e.target.value as any)}
+                        className={`w-full p-2 rounded-lg border text-xs outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-gray-200'}`}
+                      >
+                        <option value="single">Single Text</option>
+                        <option value="grid">3x3 Grid Repeat</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-semibold mb-1">Position</label>
+                      <select 
+                        disabled={watermarkStyle === 'grid'}
+                        value={watermarkPosition}
+                        onChange={(e) => setWatermarkPosition(e.target.value as any)}
+                        className={`w-full p-2 rounded-lg border text-xs outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white disabled:opacity-40' : 'bg-white border-gray-200 disabled:opacity-40'}`}
+                      >
+                        <option value="center">Center</option>
+                        <option value="top-left">Top Left</option>
+                        <option value="top-right">Top Right</option>
+                        <option value="bottom-left">Bottom Left</option>
+                        <option value="bottom-right">Bottom Right</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="block font-semibold mb-1">Size ({watermarkSize}px)</label>
+                      <input 
+                        type="range" 
+                        min={12} 
+                        max={80} 
+                        value={watermarkSize}
+                        onChange={(e) => setWatermarkSize(Number(e.target.value))}
+                        className="w-full accent-blue-600"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block font-semibold mb-1">Opacity ({Math.round(watermarkOpacity * 100)}%)</label>
+                      <input 
+                        type="range" 
+                        min={0.05} 
+                        max={0.9} 
+                        step={0.05}
+                        value={watermarkOpacity}
+                        onChange={(e) => setWatermarkOpacity(Number(e.target.value))}
+                        className="w-full accent-blue-600"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="block font-semibold mb-1">Rotation ({watermarkRotation}°)</label>
+                      <input 
+                        type="range" 
+                        min={0} 
+                        max={360} 
+                        value={watermarkRotation}
+                        onChange={(e) => setWatermarkRotation(Number(e.target.value))}
+                        className="w-full accent-blue-600"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block font-semibold mb-1">Margin ({watermarkMargin}px)</label>
+                      <input 
+                        type="range" 
+                        min={0} 
+                        max={100} 
+                        value={watermarkMargin}
+                        onChange={(e) => setWatermarkMargin(Number(e.target.value))}
+                        className="w-full accent-blue-600"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold mb-1">Color</label>
+                    <div className="flex items-center space-x-2 mt-1">
+                      <input 
+                        type="color" 
+                        value={watermarkColor}
+                        onChange={(e) => setWatermarkColor(e.target.value)}
+                        className="w-7 h-7 rounded cursor-pointer border border-gray-200 dark:border-slate-700 p-0"
+                      />
+                      <div className="flex flex-wrap gap-1">
+                        {['#CCCCCC', '#FF3B30', '#007AFF', '#34C759', '#FF9500'].map(c => (
+                          <button 
+                            key={c}
+                            onClick={() => setWatermarkColor(c)}
+                            className="w-4 h-4 rounded-full border border-gray-300 dark:border-slate-600 shadow-sm"
+                            style={{ backgroundColor: c }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className={`mt-6 grid grid-cols-2 gap-3`}>
+            <button onClick={() => executeExport('save')} className={`px-4 py-3 rounded-xl text-sm font-medium border flex items-center justify-center transition-colors ${theme === 'dark' ? 'border-slate-700 hover:bg-slate-800 text-slate-200' : 'border-gray-200 hover:bg-gray-50 text-gray-700'}`}>
+              {exportFormat === 'images' ? 'Save to Gallery' : 'Save to Storage'}
+            </button>
+            <button onClick={() => executeExport('share')} className="px-4 py-3 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 flex items-center justify-center transition-colors">
+               Share (Other)
+            </button>
+            <button onClick={() => executeExport('email')} className={`col-span-2 px-4 py-3 border rounded-xl text-sm font-medium flex items-center justify-center transition-colors ${theme === 'dark' ? 'border-slate-700 hover:bg-slate-800 text-slate-200' : 'border-gray-200 hover:bg-gray-50 text-gray-700'}`}>
+               <Mail className="w-4 h-4 mr-2" /> Share via Email
+            </button>
+          </div>
+          
+          <div className="mt-4 flex justify-center">
+            <button onClick={() => { setShowExportModalFor(null); setExportPassword(''); setExportQuality(1); }} className={`px-4 py-2 rounded-xl text-sm font-medium ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-500 hover:bg-gray-100'}`}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   const renderBatchProgressOverlay = () => {
@@ -1174,6 +1564,7 @@ export default function App() {
         imageSrc={croppedImage}
         onSave={handleFilterSave}
         onBack={() => setAppState('crop')}
+        isSaving={isProcessingStep}
       />
     );
   }
@@ -1220,6 +1611,15 @@ export default function App() {
             )}
             
             <div className="flex items-center space-x-1 sm:space-x-2 flex-shrink-0">
+              {currentDoc.isTrash && (
+                <button 
+                  onClick={() => handleRestoreDoc(currentDoc.id)} 
+                  className={`p-2 rounded-full ${theme === 'dark' ? 'text-blue-400 hover:bg-slate-800' : 'text-blue-600 hover:bg-blue-50'}`} 
+                  title="Restore"
+                >
+                   <Undo className="w-5 h-5" />
+                </button>
+              )}
               <button onClick={() => setShowExportModalFor(currentDoc.id)} className={`p-2 rounded-full ${theme === 'dark' ? 'text-green-400 hover:bg-slate-800' : 'text-green-600 hover:bg-green-50'}`} title="Export & Share">
                  <Share2 className="w-5 h-5" />
               </button>
@@ -1403,203 +1803,7 @@ export default function App() {
     );
   }
 
-  const renderExportModal = () => {
-    if (!showExportModalFor) return null;
-    const doc = documents.find(d => d.id === showExportModalFor);
-    if (!doc) return null;
-    return (
-      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-        <div className={`w-full max-w-md rounded-2xl p-6 max-h-[85vh] overflow-y-auto ${theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-gray-900'} shadow-2xl border ${theme === 'dark' ? 'border-slate-800' : 'border-gray-100'}`}>
-          <h3 className="font-bold text-xl mb-4">Export Options</h3>
-          <div className="space-y-5">
-            
-            <div>
-              <label className="block text-sm font-medium mb-2">Format</label>
-              <div className="flex bg-gray-100 rounded-lg p-1 dark:bg-slate-800">
-                <button 
-                  onClick={() => setExportFormat('pdf')} 
-                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'pdf' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
-                >
-                  PDF
-                </button>
-                <button 
-                  onClick={() => setExportFormat('images')} 
-                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'images' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
-                >
-                  Images
-                </button>
-                <button 
-                  onClick={() => setExportFormat('zip')} 
-                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'zip' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
-                >
-                  ZIP
-                </button>
-              </div>
-            </div>
 
-            {exportFormat === 'pdf' && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2">Size / Quality</label>
-                  <select 
-                    value={exportQuality} 
-                    onChange={(e) => setExportQuality(Number(e.target.value))}
-                    className={`w-full p-2.5 rounded-xl border text-sm focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-gray-50 border-gray-200'}`}
-                  >
-                    <option value={1}>Original Quality (~Max Size)</option>
-                    <option value={0.75}>High Quality (~75% Size)</option>
-                    <option value={0.5}>Medium Quality (~50% Size)</option>
-                    <option value={0.3}>Low Quality (Smallest Size)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-2">Password Protection <span className="text-xs text-gray-500 font-normal">(Optional)</span></label>
-                  <input 
-                    type="password" 
-                    placeholder="Leave blank for no password" 
-                    value={exportPassword}
-                    onChange={(e) => setExportPassword(e.target.value)}
-                    className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 placeholder-slate-500' : 'bg-gray-50 border-gray-200'}`}
-                  />
-                </div>
-              </>
-            )}
-
-            {/* Watermark Section */}
-            <div className="border-t pt-4 border-gray-100 dark:border-slate-800">
-              <div className="flex items-center justify-between mb-3">
-                <label className="text-sm font-semibold flex items-center">
-                  <span className="mr-1.5 text-base">🛡️</span> Watermark Document
-                </label>
-                <label className="relative inline-flex items-center cursor-pointer select-none">
-                  <input 
-                    type="checkbox" 
-                    checked={watermarkEnabled} 
-                    onChange={(e) => setWatermarkEnabled(e.target.checked)} 
-                    className="sr-only peer"
-                  />
-                  <div className={`w-9 h-5 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:border after:rounded-full after:h-4 after:w-4 after:transition-all ${theme === 'dark' ? 'bg-slate-700 border-slate-600 after:bg-slate-300 after:border-slate-500 peer-checked:bg-blue-500' : 'bg-gray-200 after:bg-white after:border-gray-300 peer-checked:bg-blue-600'}`}></div>
-                </label>
-              </div>
-
-              {watermarkEnabled && (
-                <div className={`space-y-3 p-3.5 rounded-xl border text-xs ${theme === 'dark' ? 'bg-slate-800/40 border-slate-800/80' : 'bg-gray-50 border-gray-100'}`}>
-                  <div>
-                    <label className="block font-semibold mb-1">Watermark Text</label>
-                    <input 
-                      type="text" 
-                      placeholder="e.g. CONFIDENTIAL, DRAFT" 
-                      value={watermarkText}
-                      onChange={(e) => setWatermarkText(e.target.value)}
-                      className={`w-full px-3 py-2 rounded-lg border text-xs focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 placeholder-slate-500 text-white' : 'bg-white border-gray-200'}`}
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block font-semibold mb-1">Style</label>
-                      <select 
-                        value={watermarkStyle}
-                        onChange={(e) => setWatermarkStyle(e.target.value as any)}
-                        className={`w-full p-2 rounded-lg border text-xs outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-gray-200'}`}
-                      >
-                        <option value="single">Single Text</option>
-                        <option value="grid">3x3 Grid Repeat</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block font-semibold mb-1">Position</label>
-                      <select 
-                        disabled={watermarkStyle === 'grid'}
-                        value={watermarkPosition}
-                        onChange={(e) => setWatermarkPosition(e.target.value as any)}
-                        className={`w-full p-2 rounded-lg border text-xs outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white disabled:opacity-40' : 'bg-white border-gray-200 disabled:opacity-40'}`}
-                      >
-                        <option value="center">Center</option>
-                        <option value="top-left">Top Left</option>
-                        <option value="top-right">Top Right</option>
-                        <option value="bottom-left">Bottom Left</option>
-                        <option value="bottom-right">Bottom Right</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3 pt-1">
-                    <div>
-                      <label className="block font-semibold mb-1">Size ({watermarkSize}px)</label>
-                      <input 
-                        type="range" 
-                        min={12} 
-                        max={80} 
-                        value={watermarkSize}
-                        onChange={(e) => setWatermarkSize(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block font-semibold mb-1">Opacity ({Math.round(watermarkOpacity * 100)}%)</label>
-                      <input 
-                        type="range" 
-                        min={0.05} 
-                        max={0.9} 
-                        step={0.05}
-                        value={watermarkOpacity}
-                        onChange={(e) => setWatermarkOpacity(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block font-semibold mb-1">Color</label>
-                    <div className="flex items-center space-x-2 mt-1">
-                      <input 
-                        type="color" 
-                        value={watermarkColor}
-                        onChange={(e) => setWatermarkColor(e.target.value)}
-                        className="w-7 h-7 rounded cursor-pointer border border-gray-200 dark:border-slate-700 p-0"
-                      />
-                      <div className="flex flex-wrap gap-1">
-                        {['#CCCCCC', '#FF3B30', '#007AFF', '#34C759', '#FF9500'].map(c => (
-                          <button 
-                            key={c}
-                            onClick={() => setWatermarkColor(c)}
-                            className="w-4 h-4 rounded-full border border-gray-300 dark:border-slate-600 shadow-sm"
-                            style={{ backgroundColor: c }}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className={`mt-6 grid grid-cols-2 gap-3`}>
-            <button onClick={() => executeExport('save')} className={`px-4 py-3 rounded-xl text-sm font-medium border flex items-center justify-center transition-colors ${theme === 'dark' ? 'border-slate-700 hover:bg-slate-800 text-slate-200' : 'border-gray-200 hover:bg-gray-50 text-gray-700'}`}>
-              {exportFormat === 'images' ? 'Save to Gallery' : 'Save to Storage'}
-            </button>
-            <button onClick={() => executeExport('share')} className="px-4 py-3 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 flex items-center justify-center transition-colors">
-               Share (Other)
-            </button>
-            <button onClick={() => executeExport('email')} className={`col-span-2 px-4 py-3 border rounded-xl text-sm font-medium flex items-center justify-center transition-colors ${theme === 'dark' ? 'border-slate-700 hover:bg-slate-800 text-slate-200' : 'border-gray-200 hover:bg-gray-50 text-gray-700'}`}>
-               <Mail className="w-4 h-4 mr-2" /> Share via Email
-            </button>
-          </div>
-          
-          <div className="mt-4 flex justify-center">
-            <button onClick={() => { setShowExportModalFor(null); setExportPassword(''); setExportQuality(1); }} className={`px-4 py-2 rounded-xl text-sm font-medium ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-500 hover:bg-gray-100'}`}>
-              Cancel
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
 
   const renderNotesTab = () => {
     const filteredNotes = noteSearchQuery.trim()
@@ -1966,6 +2170,15 @@ export default function App() {
               </label>
               
               <button 
+                onClick={handleRestoreSelected} 
+                disabled={selectedDocs.size === 0}
+                className={`p-2 rounded-full transition-all disabled:opacity-40 ${theme === 'dark' ? 'text-blue-400 hover:bg-slate-800' : 'text-blue-600 hover:bg-blue-100'}`}
+                title="Restore Selected"
+              >
+                 <Undo className="w-5 h-5" />
+              </button>
+              
+              <button 
                 onClick={handleMoveToFolder} 
                 disabled={selectedDocs.size === 0}
                 className={`p-2 rounded-full transition-all disabled:opacity-40 ${theme === 'dark' ? 'text-indigo-400 hover:bg-slate-800' : 'text-indigo-600 hover:bg-indigo-100'}`}
@@ -2238,7 +2451,10 @@ export default function App() {
                   <p className="text-lg font-medium text-gray-600">No matching scans found</p>
                   <p className="text-sm">Try checking your spelling or search terms</p>
                </div>
-             ) : activeFolderFilter !== 'all' && filteredDocs.filter(d => (activeFolderFilter === 'root' && !d.folderId) || d.folderId === activeFolderFilter).length === 0 ? (
+             ) : activeFolderFilter !== 'all' && filteredDocs.filter(d => {
+                   if (activeFolderFilter === 'trash') return d.isTrash;
+                   return (activeFolderFilter === 'root' && !d.folderId) || d.folderId === activeFolderFilter;
+                 }).length === 0 ? (
                 <div className="py-12 flex flex-col items-center justify-center text-gray-400 space-y-3">
                    <FolderOpen className="w-12 h-12 text-gray-300 stroke-[1.5]" />
                    <p className="text-lg font-medium text-gray-600">This folder is empty</p>
@@ -2251,8 +2467,11 @@ export default function App() {
                     : [activeFolderFilter];
                   
                   return foldersToRender.map(folderId => {
-                    const folderName = folderId === 'root' ? 'All Scans' : folders.find(f => f.id === folderId)?.name;
-                    let folderDocs = filteredDocs.filter(d => (folderId === 'root' && !d.folderId) || d.folderId === folderId);
+                    const folderName = folderId === 'root' ? 'All Scans' : (folderId === 'trash' ? 'Trash' : folders.find(f => f.id === folderId)?.name);
+                    let folderDocs = filteredDocs.filter(d => {
+                      if (folderId === 'trash') return d.isTrash;
+                      return (folderId === 'root' && !d.folderId) || d.folderId === folderId;
+                    });
                  
                     if (folderDocs.length === 0) return null;
                
