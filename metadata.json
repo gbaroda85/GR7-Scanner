@@ -1,0 +1,6 @@
+{
+  "name": "Document Scanner and PDF Converter",
+  "description": "An interactive document scanner app with crop boundary detection, image filters, and PDF export capabilities.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

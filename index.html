@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Google AI Studio App</title>
+    <script src="https://docs.opencv.org/4.7.0/opencv.js" async></script>
+    <script>
+      (function() {
+        try {
+          const targets = [];
+          if (typeof window !== 'undefined') targets.push(window);
+          if (typeof globalThis !== 'undefined') targets.push(globalThis);
+          if (typeof self !== 'undefined') targets.push(self);
+
+          const keys = ['fetch', 'Headers', 'Request', 'Response'];
+
+          targets.forEach(target => {
+            if (!target) return;
+            keys.forEach(key => {
+              try {
+                if (key in target) {
+                  const originalVal = target[key];
+                  let currentVal = originalVal;
+                  Object.defineProperty(target, key, {
+                    get() { return currentVal; },
+                    set(val) { currentVal = val; },
+                    configurable: true,
+                    enumerable: true
+                  });
+                }
+              } catch (innerErr) {
+                // Ignore silent errors for individual properties
+              }
+            });
+          });
+        } catch (e) {
+          console.warn("Failed to patch global descriptors:", e);
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

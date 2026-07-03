@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@theme {
+  --color-warm-bg: #FDF6ED;
+  --color-warm-card: #F9EFE4;
+  --color-warm-text: #4A3D36;
+  --color-warm-border: #E8D6C8;
+  --color-warm-accent: #8BA390; /* moss green */
+  --color-warm-peach: #F3B398;
+}
+
+@layer utilities {
+  .hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
