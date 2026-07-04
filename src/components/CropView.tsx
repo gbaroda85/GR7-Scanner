@@ -278,21 +278,21 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
 
   return (
     <div className="flex flex-col h-[100dvh] bg-gray-900 text-white overflow-hidden relative">
-      <div className="flex items-center justify-between p-4 bg-black z-20">
+      <div className="flex items-center justify-between p-4 safe-pt bg-black z-20">
         <div className="flex items-center space-x-2">
           <button 
             onClick={onCancel} 
             disabled={isProcessing} 
-            className="px-3 py-1 text-gray-300 disabled:opacity-50 text-sm"
+            className="touch-target px-3 py-1 text-gray-300 disabled:opacity-50 text-sm"
           >
             Cancel
           </button>
         </div>
-        <h2 className="text-sm font-medium text-gray-400 absolute left-1/2 -translate-x-1/2 pointer-events-none">Adjust Crop</h2>
+        <h2 className="text-sm font-medium text-gray-400 absolute left-1/2 -translate-x-1/2 pointer-events-none safe-pt">Adjust Crop</h2>
         <button 
           onClick={() => onCrop(corners)} 
           disabled={isProcessing} 
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-sm shadow-lg active:scale-95 transition-all disabled:opacity-50"
+          className="touch-target px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-sm shadow-lg active:scale-95 transition-all disabled:opacity-50"
         >
           Next
         </button>
@@ -332,7 +332,7 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
         )}
       </div>
       
-      <div className="p-6 bg-black text-center text-sm text-gray-400">
+      <div className="p-6 safe-pb bg-black text-center text-sm text-gray-400">
         Drag the corners to fit the document
       </div>
     </div>

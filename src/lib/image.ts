@@ -319,6 +319,58 @@ export async function warpPerspective(
   return dstCanvas.toDataURL('image/jpeg', 0.9);
 }
 
+function boxBlur(imageData: ImageData, radius: number) {
+  const data = imageData.data;
+  const width = imageData.width;
+  const height = imageData.height;
+  
+  const temp = new Uint8ClampedArray(data.length);
+  temp.set(data);
+  
+  // Horizontal pass
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let rSum = 0, gSum = 0, bSum = 0, count = 0;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const nx = x + dx;
+        if (nx >= 0 && nx < width) {
+          const idx = (y * width + nx) * 4;
+          rSum += temp[idx];
+          gSum += temp[idx + 1];
+          bSum += temp[idx + 2];
+          count++;
+        }
+      }
+      const destIdx = (y * width + x) * 4;
+      data[destIdx] = Math.round(rSum / count);
+      data[destIdx + 1] = Math.round(gSum / count);
+      data[destIdx + 2] = Math.round(bSum / count);
+    }
+  }
+  
+  // Vertical pass
+  temp.set(data);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let rSum = 0, gSum = 0, bSum = 0, count = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const ny = y + dy;
+        if (ny >= 0 && ny < height) {
+          const idx = (ny * width + x) * 4;
+          rSum += temp[idx];
+          gSum += temp[idx + 1];
+          bSum += temp[idx + 2];
+          count++;
+        }
+      }
+      const destIdx = (y * width + x) * 4;
+      data[destIdx] = Math.round(rSum / count);
+      data[destIdx + 1] = Math.round(gSum / count);
+      data[destIdx + 2] = Math.round(bSum / count);
+    }
+  }
+}
+
 export async function applyFilter(
   imageSrc: string, 
   filterType: FilterType,
@@ -380,8 +432,11 @@ export async function applyFilter(
   smallCanvas.height = smallH;
   const smallCtx = smallCanvas.getContext('2d')!;
   
-  smallCtx.filter = 'blur(4px)';
+  // Use pure-JS boxBlur for 100% cross-browser reliability instead of unstable ctx.filter
   smallCtx.drawImage(adjCanvas, 0, 0, smallW, smallH);
+  const smallImgData = smallCtx.getImageData(0, 0, smallW, smallH);
+  boxBlur(smallImgData, 3);
+  smallCtx.putImageData(smallImgData, 0, 0);
   
   smallCtx.globalCompositeOperation = 'difference';
   smallCtx.fillStyle = 'white';
@@ -805,7 +860,7 @@ function extractBestQuadrilateral(
   }
 }
 
-function detectDocumentCornersOpenCV(img: HTMLImageElement): Point[] | null {
+function detectDocumentCornersOpenCV(img: HTMLImageElement | HTMLCanvasElement): Point[] | null {
   const cv = (window as any).cv;
   if (!cv || !cv.Mat) {
     console.log("OpenCV.js not loaded yet or unavailable.");
@@ -979,7 +1034,7 @@ function detectDocumentCornersOpenCV(img: HTMLImageElement): Point[] | null {
   return null;
 }
 
-export function detectDocumentCorners(img: HTMLImageElement): Point[] | null {
+export function detectDocumentCorners(img: HTMLImageElement | HTMLCanvasElement): Point[] | null {
   // First, attempt to detect using OpenCV.js if loaded and highly confident.
   try {
     const cvCorners = detectDocumentCornersOpenCV(img);

@@ -72,13 +72,13 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
   ];
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-white">
-      <div className="flex items-center justify-between p-4 bg-black">
-        <button onClick={onBack} className="p-2 -ml-2 text-gray-300">
+    <div className="flex flex-col h-[100dvh] bg-gray-900 text-white overflow-hidden">
+      <div className="flex items-center justify-between p-4 safe-pt bg-black">
+        <button onClick={onBack} className="touch-target p-2 -ml-2 text-gray-300">
           <ChevronLeft className="w-6 h-6" />
         </button>
         <h2 className="text-lg font-medium">Fine Tuning</h2>
-        <button onClick={handleSave} className="p-2 -mr-2 text-blue-400 font-medium" disabled={isProcessing || isSaving}>
+        <button onClick={handleSave} className="touch-target p-2 -mr-2 text-blue-400 font-medium" disabled={isProcessing || isSaving}>
           {isSaving ? (
              <div className="w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
           ) : (
@@ -97,6 +97,7 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
           src={previewImage}
           alt="Filtered preview"
           className="max-w-full max-h-full object-contain"
+          style={{ touchAction: 'pinch-zoom' }}
         />
       </div>
       
@@ -112,7 +113,7 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
                 min="50" max="150" 
                 value={brightness} 
                 onChange={e => setBrightness(Number(e.target.value))}
-                className="w-full accent-blue-500"
+                className="w-full accent-blue-500 min-h-[48px]"
               />
            </div>
            <div>
@@ -125,18 +126,18 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
                 min="50" max="200" 
                 value={contrast} 
                 onChange={e => setContrast(Number(e.target.value))}
-                className="w-full accent-blue-500"
+                className="w-full accent-blue-500 min-h-[48px]"
               />
            </div>
         </div>
       )}
 
-      <div className="bg-black p-4 pb-8">
+      <div className="bg-black p-4 pb-8 safe-pb">
         <div className="flex items-center justify-between mb-6 px-2">
-           <button onClick={() => setShowAdjustments(!showAdjustments)} className={`p-3 rounded-full transition-colors ${showAdjustments ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}>
+           <button onClick={() => setShowAdjustments(!showAdjustments)} className={`touch-target p-3 rounded-full transition-colors ${showAdjustments ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}>
               <SlidersHorizontal className="w-5 h-5" />
            </button>
-           <button onClick={handleRotate} className="p-3 rounded-full bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors">
+           <button onClick={handleRotate} className="touch-target p-3 rounded-full bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors">
               <RotateCw className="w-5 h-5" />
            </button>
         </div>
@@ -146,7 +147,7 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
              <button
                key={opt.id}
                onClick={() => setFilter(opt.id)}
-               className={`flex flex-col items-center justify-center flex-shrink-0 space-y-2 transition-colors ${
+               className={`touch-target flex flex-col items-center justify-center flex-shrink-0 space-y-2 transition-colors ${
                  filter === opt.id ? 'text-blue-400' : 'text-gray-400 hover:text-gray-200'
                }`}
              >
