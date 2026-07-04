@@ -473,7 +473,19 @@ export default function App() {
 
         // Load image to run corner detection
         const img = await loadImage(finalUrl);
-        const corners = detectDocumentCorners(img);
+        let corners = detectDocumentCorners(img);
+        
+        // If detection fails, provide default corners (10% margin) so the page is still processed
+        if (!corners) {
+          const marginW = img.width * 0.1;
+          const marginH = img.height * 0.1;
+          corners = [
+            { x: marginW, y: marginH },
+            { x: img.width - marginW, y: marginH },
+            { x: img.width - marginW, y: img.height - marginH },
+            { x: marginW, y: img.height - marginH }
+          ];
+        }
 
         if (objectUrl) URL.revokeObjectURL(objectUrl);
 
@@ -1598,20 +1610,22 @@ export default function App() {
            </button>
          </div>
          
-          <div className="flex-1 overflow-auto p-4 touch-auto flex items-center justify-center">
+          <div className="flex-1 overflow-auto p-4 touch-auto">
             <div 
-              className="transition-all duration-200 ease-out flex items-center justify-center"
+              className="transition-all duration-200 ease-out flex items-center justify-center min-h-full min-w-full"
               style={{ 
                 width: fullScreenScale > 1 ? `${fullScreenScale * 100}%` : "100%",
                 height: fullScreenScale > 1 ? `${fullScreenScale * 100}%` : "100%",
-                minWidth: "100%",
-                minHeight: "100%"
               }}
             >
               <img 
                 src={fullScreenImage} 
                 alt="Fullscreen preview" 
-                className={`max-w-full max-h-full object-contain drop-shadow-2xl transition-all duration-200 ${addPdfBorder ? "border-[4px] border-black ring-2 ring-white/15" : ""}`} 
+                style={{ 
+                  maxWidth: fullScreenScale > 1 ? "none" : "95vw",
+                  maxHeight: fullScreenScale > 1 ? "none" : "90vh",
+                }} 
+                className={`object-contain drop-shadow-2xl transition-all duration-200 ${addPdfBorder ? "border-[4px] border-black ring-2 ring-white/15" : ""}`} 
                 draggable={false}
               />
             </div>
