@@ -595,11 +595,18 @@ export default function App() {
       
       if (processingQueue.length > 0) {
          const nextItem = processingQueue[0];
-         setCapturedImage(nextItem.url);
-         setProcessingQueue(processingQueue.slice(1));
+         
+         // Set loading state or clear current images to prevent flickering old data
+         setCapturedImage(null);
          setCroppedImage(null);
-         setCurrentCorners(nextItem.corners || undefined);
-         setAppState('crop');
+         setAppState('batch_progress'); // Show a small transition or just clear
+         
+         setTimeout(() => {
+           setCapturedImage(nextItem.url);
+           setProcessingQueue(processingQueue.slice(1));
+           setCurrentCorners(nextItem.corners || undefined);
+           setAppState('crop');
+         }, 400);
       } else {
          setCapturedImage(null);
          setCroppedImage(null);
@@ -607,9 +614,11 @@ export default function App() {
          setAppState('view_doc');
       }
 
-      // Revoke the old object URL if it was a blob URL
+      // Delay revocation to ensure UI has switched away from the old image
       if (oldUrl && oldUrl.startsWith('blob:')) {
-         URL.revokeObjectURL(oldUrl);
+         setTimeout(() => {
+           try { URL.revokeObjectURL(oldUrl); } catch(e) {}
+         }, 2000);
       }
     } catch (err: any) {
       console.error("Save error:", err);
@@ -620,19 +629,51 @@ export default function App() {
     }
   };
 
+  const downloadFile = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    
+    // Crucial for some mobile browsers/webviews to handle blobs correctly
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if (isMobile) {
+      a.target = '_blank';
+    }
+    
+    document.body.appendChild(a);
+    a.click();
+    
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 2000);
+  };
+
   const handleSaveAsPDF = async (doc: Document) => {
     try {
       const blob = await generatePDF(doc, { drawBorder: addPdfBorder });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${doc.title}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      
+      // On mobile, navigator.share is much more reliable than <a> download
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      const file = new File([blob], `${doc.title}.pdf`, { type: 'application/pdf' });
+      
+      if (isMobile && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: doc.title,
+          });
+          return;
+        } catch (shareErr) {
+          console.warn("Share failed, falling back to download", shareErr);
+        }
+      }
+
+      downloadFile(blob, `${doc.title}.pdf`);
     } catch (e) {
       console.error("Failed to generate PDF", e);
+      setErrorMessage("Could not generate PDF. Please try again.");
     }
   };
 
@@ -797,14 +838,7 @@ export default function App() {
         zip.file(`${doc.title}_Page_${i + 1}.jpg`, blob);
       }
       const zipBlob = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(zipBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${doc.title}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      downloadFile(zipBlob, `${doc.title}.zip`);
     } catch (e) {
       console.error("Error creating ZIP", e);
     }
@@ -821,14 +855,7 @@ export default function App() {
         }
         const res = await fetch(src);
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${doc.title}_Page_${i + 1}.jpg`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        downloadFile(blob, `${doc.title}_Page_${i + 1}.jpg`);
         await new Promise(r => setTimeout(r, 200));
       }
     } catch (e) {
@@ -864,14 +891,7 @@ export default function App() {
         const file = new File([blob], `${doc.title}.pdf`, { type: 'application/pdf' });
         
         if (action === 'save') {
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `${doc.title}.pdf`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
+          downloadFile(blob, `${doc.title}.pdf`);
         } else if (action === 'email') {
           // Check if we can share with files (preferred for attachments)
           if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -895,14 +915,7 @@ export default function App() {
           window.location.href = `mailto:?subject=${subject}&body=${body}`;
 
           // Also download for easy attachment
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `${doc.title}.pdf`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
+          downloadFile(blob, `${doc.title}.pdf`);
           
           showCustomAlert("Email App Opened: Standard email links cannot attach files automatically. The PDF has been downloaded to your device so you can attach it to the email manually.");
         } else {
@@ -917,14 +930,7 @@ export default function App() {
             }
           } catch (shareErr) {
             // fallback
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `${doc.title}.pdf`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            downloadFile(blob, `${doc.title}.pdf`);
             await showCustomAlert("System sharing is not fully supported in this browser. The PDF has been downloaded to your device instead.");
           }
         }
@@ -1118,14 +1124,7 @@ export default function App() {
        } catch (shareErr) {
           for (const doc of docsToShare) {
              const blob = await generatePDF(doc, { drawBorder: addPdfBorder });
-             const url = URL.createObjectURL(blob);
-             const a = document.createElement('a');
-             a.href = url;
-             a.download = `${doc.title}.pdf`;
-             document.body.appendChild(a);
-             a.click();
-             document.body.removeChild(a);
-             URL.revokeObjectURL(url);
+             downloadFile(blob, `${doc.title}.pdf`);
           }
           await showCustomAlert("System sharing is not fully supported in this browser. The PDFs have been downloaded to your device instead.");
        }
@@ -1589,12 +1588,6 @@ export default function App() {
              >
                <ZoomIn className="w-5 h-5" />
              </button>
-             <button 
-               onClick={() => setFullScreenScale(1)}
-               className="px-2 py-1 text-[10px] text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-md transition-colors"
-             >
-               Reset
-             </button>
            </div>
            <button 
              onClick={() => { setFullScreenImage(null); setFullScreenScale(1); }} 
@@ -1605,25 +1598,24 @@ export default function App() {
            </button>
          </div>
          
-         <div className="flex-1 overflow-auto flex items-center justify-center p-4 touch-auto">
-           <div 
-             className="transition-transform duration-200 ease-out origin-center"
-             style={{ transform: `scale(${fullScreenScale})` }}
-             onClick={(e) => {
-               if (fullScreenScale > 1) {
-                  // If zoomed in, allow clicking background to close might be annoying, 
-                  // but here we only close if clicking the actual image container?
-               }
-             }}
-           >
-             <img 
-               src={fullScreenImage} 
-               alt="Fullscreen preview" 
-               className={`max-w-full max-h-[90vh] object-contain drop-shadow-2xl ${addPdfBorder ? 'border-[4px] border-black ring-2 ring-white/15' : ''}`} 
-               draggable={false}
-             />
-           </div>
-         </div>
+          <div className="flex-1 overflow-auto p-4 touch-auto flex items-center justify-center">
+            <div 
+              className="transition-all duration-200 ease-out flex items-center justify-center"
+              style={{ 
+                width: fullScreenScale > 1 ? `${fullScreenScale * 100}%` : "100%",
+                height: fullScreenScale > 1 ? `${fullScreenScale * 100}%` : "100%",
+                minWidth: "100%",
+                minHeight: "100%"
+              }}
+            >
+              <img 
+                src={fullScreenImage} 
+                alt="Fullscreen preview" 
+                className={`max-w-full max-h-full object-contain drop-shadow-2xl transition-all duration-200 ${addPdfBorder ? "border-[4px] border-black ring-2 ring-white/15" : ""}`} 
+                draggable={false}
+              />
+            </div>
+          </div>
       </div>
     );
   };

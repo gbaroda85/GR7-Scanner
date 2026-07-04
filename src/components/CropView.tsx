@@ -3,9 +3,10 @@ import { Point } from '../types';
 import { detectDocumentCorners } from '../lib/image';
 
 interface CropViewProps {
+  key?: string;
   imageSrc: string;
   initialCorners?: Point[];
-  onCrop: (corners: Point[]) => void;
+  onCrop: (corners: Point[]) => void | Promise<void>;
   onCancel: () => void;
   isProcessing?: boolean;
 }
@@ -131,8 +132,9 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
 
   const handlePointerDown = (idx: number) => (e: React.PointerEvent) => {
     if (isProcessing) return;
-    e.preventDefault();
+    
     setDraggingIdx(idx);
+    
     // Vibrate on touch if supported
     if (window.navigator.vibrate) {
       window.navigator.vibrate(10);
@@ -140,13 +142,13 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
   };
 
   const handlePointerMove = useCallback((e: PointerEvent) => {
-    if (draggingIdx === null || !imageRef.current) return;
+    if (draggingIdx === null || !imageRef.current || isProcessing) return;
     
     const rect = imageRef.current.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
     
-    const scaleX = imageSize.naturalWidth / rect.width;
-    const scaleY = imageSize.naturalHeight / rect.height;
+    const scaleX = (imageSize.naturalWidth || imageRef.current.naturalWidth) / rect.width;
+    const scaleY = (imageSize.naturalHeight || imageRef.current.naturalHeight) / rect.height;
 
     if (isNaN(scaleX) || isNaN(scaleY) || !isFinite(scaleX) || !isFinite(scaleY)) return;
 
@@ -154,15 +156,15 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
     let y = (e.clientY - rect.top) * scaleY;
 
     // Clamp to image bounds
-    x = Math.max(0, Math.min(x, imageSize.naturalWidth));
-    y = Math.max(0, Math.min(y, imageSize.naturalHeight));
+    x = Math.max(0, Math.min(x, imageSize.naturalWidth || imageRef.current.naturalWidth));
+    y = Math.max(0, Math.min(y, imageSize.naturalHeight || imageRef.current.naturalHeight));
 
     setCorners(prev => {
       const next = [...prev];
       next[draggingIdx] = { x, y };
       return next;
     });
-  }, [draggingIdx, imageSize]);
+  }, [draggingIdx, imageSize, isProcessing]);
 
   const handlePointerUp = useCallback(() => {
     setDraggingIdx(null);
@@ -172,10 +174,12 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
     if (draggingIdx !== null) {
       window.addEventListener('pointermove', handlePointerMove);
       window.addEventListener('pointerup', handlePointerUp);
+      window.addEventListener('pointercancel', handlePointerUp);
     }
     return () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
     };
   }, [draggingIdx, handlePointerMove, handlePointerUp]);
 
@@ -191,13 +195,15 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
       <div
         key={i}
         onPointerDown={handlePointerDown(i)}
-        className="absolute w-12 h-12 flex items-center justify-center cursor-move transform -translate-x-1/2 -translate-y-1/2 touch-none select-none z-[100]"
+        className="absolute w-14 h-14 flex items-center justify-center cursor-move transform -translate-x-1/2 -translate-y-1/2 touch-none select-none z-[100]"
         style={{
           left: `${c.x * scaleX}px`,
           top: `${c.y * scaleY}px`,
+          // Add a larger transparent hit area for easier grabbing
+          padding: '20px'
         }}
       >
-        <div className={`w-8 h-8 rounded-full border-2 border-white shadow-lg transition-transform ${draggingIdx === i ? 'bg-blue-400 scale-125' : 'bg-blue-600'}`} />
+        <div className={`w-9 h-9 rounded-full border-2 border-white shadow-xl transition-all duration-75 ${draggingIdx === i ? 'bg-blue-400 scale-150 ring-4 ring-blue-500/30' : 'bg-blue-600 active:scale-125'}`} />
       </div>
     ));
   };
@@ -280,22 +286,6 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
             className="px-3 py-1 text-gray-300 disabled:opacity-50 text-sm"
           >
             Cancel
-          </button>
-          <button 
-            onClick={() => {
-              const marginX = imageSize.naturalWidth * 0.1;
-              const marginY = imageSize.naturalHeight * 0.1;
-              setCorners([
-                { x: marginX, y: marginY },
-                { x: imageSize.naturalWidth - marginX, y: marginY },
-                { x: imageSize.naturalWidth - marginX, y: imageSize.naturalHeight - marginY },
-                { x: marginX, y: imageSize.naturalHeight - marginY }
-              ]);
-            }}
-            disabled={isProcessing}
-            className="px-3 py-1 text-gray-400 text-xs border border-gray-800 rounded-md hover:bg-gray-900"
-          >
-            Reset
           </button>
         </div>
         <h2 className="text-sm font-medium text-gray-400 absolute left-1/2 -translate-x-1/2 pointer-events-none">Adjust Crop</h2>
