@@ -365,7 +365,7 @@ export async function applyFilter(
     photoCanvas.width = adjCanvas.width;
     photoCanvas.height = adjCanvas.height;
     const photoCtx = photoCanvas.getContext('2d')!;
-    photoCtx.filter = 'saturate(1.2) contrast(1.1)';
+    photoCtx.filter = 'saturate(1.1) contrast(1.05)';
     photoCtx.drawImage(adjCanvas, 0, 0);
     return photoCanvas.toDataURL('image/jpeg', 0.9);
   }
@@ -401,15 +401,15 @@ export async function applyFilter(
   const imageData = normCtx.getImageData(0, 0, adjCanvas.width, adjCanvas.height);
   const data = imageData.data;
   
-  let blackPoint = 120;
-  let whitePoint = 230;
+  let blackPoint = 80; 
+  let whitePoint = 220; 
   
   if (filterType === 'magic') {
-     blackPoint = 60; // Lower black point to avoid crushing dark colors too much
-     whitePoint = 245; // Higher white point to keep light lines from vanishing
+     blackPoint = 40; 
+     whitePoint = 245; 
   } else if (filterType === 'bw') {
-     blackPoint = 140;
-     whitePoint = 220;
+     blackPoint = 120;
+     whitePoint = 200;
   }
   
   const range = whitePoint - blackPoint;
@@ -419,38 +419,64 @@ export async function applyFilter(
      let g = data[i+1];
      let b = data[i+2];
      
+     let lum = r * 0.299 + g * 0.587 + b * 0.114;
+     let chroma = Math.max(r, g, b) - Math.min(r, g, b);
+
      if (filterType === 'bw') {
-        let gray = r * 0.299 + g * 0.587 + b * 0.114;
         let v = 0;
-        if (gray < blackPoint) v = 0;
-        else if (gray > whitePoint) v = 255;
-        else v = (gray - blackPoint) * 255 / range;
+        if (lum < blackPoint) v = 0;
+        else if (lum > whitePoint) v = 255;
+        else v = (lum - blackPoint) * 255 / range;
         
         data[i] = v;
         data[i+1] = v;
         data[i+2] = v;
-     } else { // 'document' or 'magic'
-        let lum = r * 0.299 + g * 0.587 + b * 0.114;
-        let s = 1;
+     } else if (filterType === 'magic') {
+        // MAGIC FILTER: Preserve colors, whiten background
+        // Colorful pixels (stamps, photos) get protection from aggressive whitening
+        const protection = Math.min(70, chroma * 2.0);
+        const activeWhitePoint = Math.min(255, whitePoint + protection);
         
-        if (lum < blackPoint) {
-            s = 0; // Pitch black
-        } else if (lum > whitePoint) {
-            s = 255 / lum; // Pure white
+        if (lum > activeWhitePoint) {
+           data[i] = 255;
+           data[i+1] = 255;
+           data[i+2] = 255;
         } else {
-            s = ((lum - blackPoint) * 255 / range) / lum; 
+           // Smooth transition near the white point to prevent harsh edges
+           let whiteFactor = 1.0;
+           if (lum > activeWhitePoint - 20) {
+               whiteFactor = (activeWhitePoint - lum) / 20;
+           }
+
+           // Reduce black point influence for colorful pixels to keep ink colors rich
+           const adjustedBlackPoint = blackPoint * Math.max(0, 1 - (chroma / 30));
+           const currentRange = activeWhitePoint - adjustedBlackPoint;
+           
+           let s = (lum - adjustedBlackPoint) * 255 / (currentRange || 1);
+           s = Math.min(255, Math.max(0, s));
+           
+           // Boost saturation and maintain color ratio
+           const satBoost = 1.25;
+           const ratio = s / (lum || 1);
+           
+           let nr = (r * ratio - s) * satBoost + s;
+           let ng = (g * ratio - s) * satBoost + s;
+           let nb = (b * ratio - s) * satBoost + s;
+           
+           // Blend towards white for background areas
+           data[i] = Math.min(255, Math.max(0, nr * whiteFactor + 255 * (1 - whiteFactor)));
+           data[i+1] = Math.min(255, Math.max(0, ng * whiteFactor + 255 * (1 - whiteFactor)));
+           data[i+2] = Math.min(255, Math.max(0, nb * whiteFactor + 255 * (1 - whiteFactor)));
         }
+     } else { // 'document'
+        // DOCUMENT FILTER: Balanced contrast and color
+        let s = (lum - blackPoint) * 255 / range;
+        s = Math.min(255, Math.max(0, s));
+        const ratio = s / (lum || 1);
         
-        // Boost saturation less aggressively to avoid breaking gradients in photos
-        const satBoost = filterType === 'magic' ? 1.5 : 1.1; 
-        
-        r = (r - lum) * satBoost + lum * s;
-        g = (g - lum) * satBoost + lum * s;
-        b = (b - lum) * satBoost + lum * s;
-        
-        data[i] = Math.min(255, Math.max(0, r));
-        data[i+1] = Math.min(255, Math.max(0, g));
-        data[i+2] = Math.min(255, Math.max(0, b));
+        data[i] = Math.min(255, Math.max(0, r * ratio));
+        data[i+1] = Math.min(255, Math.max(0, g * ratio));
+        data[i+2] = Math.min(255, Math.max(0, b * ratio));
      }
   }
   

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Camera, Image as ImageIcon, Plus, FileText, ChevronRight, Download, Trash2, ArrowLeft, Share2, CheckSquare, Square, X, ArrowDownUp, LayoutGrid, List as ListIcon, FolderInput, FolderPlus, Combine, Pencil, Check, Search, ArrowUp, ArrowDown, GripVertical, Home, StickyNote, User, Settings, Sun, Moon, Crop, MoreVertical, Lock, Unlock, FileArchive, FolderOpen, Mail, Undo } from 'lucide-react';
+import { Camera, Image as ImageIcon, Plus, FileText, ChevronRight, Download, Trash2, ArrowLeft, Share2, CheckSquare, Square, X, ArrowDownUp, LayoutGrid, List as ListIcon, FolderInput, FolderPlus, Combine, Pencil, Check, Search, ArrowUp, ArrowDown, GripVertical, Home, StickyNote, User, Settings, Sun, Moon, Crop, MoreVertical, Lock, Unlock, FileArchive, FolderOpen, Mail, Undo, ZoomIn, ZoomOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { getDocuments, saveDocument, deleteDocument, getFolders, saveFolder, deleteFolder } from './lib/store';
 import { Document, DocumentPage, Point, FilterType, Folder, QueueItem, WatermarkOptions } from './types';
@@ -85,6 +85,7 @@ export default function App() {
   
   // Tab navigation states
   const [fullScreenImage, setFullScreenImage] = useState<string | null>(null);
+  const [fullScreenScale, setFullScreenScale] = useState<number>(1);
   const [currentTab, setCurrentTab] = useState<'home' | 'notes' | 'profile' | 'settings'>('home');
   const [showScanMenu, setShowScanMenu] = useState(false);
   const [totalBatchFiles, setTotalBatchFiles] = useState(0);
@@ -457,10 +458,10 @@ export default function App() {
           return null;
         }
 
-        // Downscale to 1600 max dimension
+        // Downscale to 2400 max dimension
         let finalUrl = '';
         try {
-           finalUrl = await downscaleImage(objectUrl, 1600);
+           finalUrl = await downscaleImage(objectUrl, 2400);
         } catch (e) {
            // Fallback to Data URL if downscale fails so we don't return a revoked Object URL
            finalUrl = await new Promise<string>((resolve) => {
@@ -489,7 +490,7 @@ export default function App() {
       }
     };
 
-    // Process files simultaneously using a promise-based worker queue (concurrency limit = 3)
+    // Process files sequentially to prevent main-thread congestion and memory spikes
     const runInQueue = async (files: File[], limit: number): Promise<QueueItem[]> => {
       const results = new Array<QueueItem | null>(files.length).fill(null);
       let index = 0;
@@ -500,6 +501,8 @@ export default function App() {
           const file = files[currentIndex];
           const res = await processFile(file);
           results[currentIndex] = res;
+          // Small breathing room for GC
+          await new Promise(r => setTimeout(r, 100));
         }
       };
 
@@ -509,7 +512,7 @@ export default function App() {
     };
 
     try {
-      const results = await runInQueue(files, 3);
+      const results = await runInQueue(files, 1);
       if (results.length > 0) {
         setCapturedImage(results[0].url);
         setCurrentCorners(results[0].corners || undefined);
@@ -586,6 +589,7 @@ export default function App() {
       const freshDocs = await getDocuments();
       setDocuments(freshDocs);
       
+      const oldUrl = capturedImage;
       setEditingPageId(null);
       setCurrentDoc(updatedDoc);
       
@@ -601,6 +605,11 @@ export default function App() {
          setCroppedImage(null);
          setCurrentCorners(undefined);
          setAppState('view_doc');
+      }
+
+      // Revoke the old object URL if it was a blob URL
+      if (oldUrl && oldUrl.startsWith('blob:')) {
+         URL.revokeObjectURL(oldUrl);
       }
     } catch (err: any) {
       console.error("Save error:", err);
@@ -1543,6 +1552,7 @@ export default function App() {
   if (appState === 'crop' && capturedImage) {
     return (
       <CropView
+        key={capturedImage}
         imageSrc={capturedImage}
         initialCorners={currentCorners}
         onCrop={handleCropNext}
@@ -1557,6 +1567,66 @@ export default function App() {
       />
     );
   }
+
+  const renderFullScreenImageOverlay = () => {
+    if (!fullScreenImage) return null;
+    return (
+      <div className="fixed inset-0 bg-black/95 z-[100] flex flex-col animate-in fade-in duration-200">
+         <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center z-[110] bg-gradient-to-b from-black/60 to-transparent">
+           <div className="flex items-center space-x-2">
+             <button 
+               onClick={() => setFullScreenScale(prev => Math.max(1, prev - 0.5))}
+               className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
+               title="Zoom Out"
+             >
+               <ZoomOut className="w-5 h-5" />
+             </button>
+             <span className="text-white/60 text-xs font-mono w-12 text-center">{Math.round(fullScreenScale * 100)}%</span>
+             <button 
+               onClick={() => setFullScreenScale(prev => Math.min(4, prev + 0.5))}
+               className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
+               title="Zoom In"
+             >
+               <ZoomIn className="w-5 h-5" />
+             </button>
+             <button 
+               onClick={() => setFullScreenScale(1)}
+               className="px-2 py-1 text-[10px] text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-md transition-colors"
+             >
+               Reset
+             </button>
+           </div>
+           <button 
+             onClick={() => { setFullScreenImage(null); setFullScreenScale(1); }} 
+             className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
+             title="Close"
+           >
+             <X className="w-6 h-6" />
+           </button>
+         </div>
+         
+         <div className="flex-1 overflow-auto flex items-center justify-center p-4 touch-auto">
+           <div 
+             className="transition-transform duration-200 ease-out origin-center"
+             style={{ transform: `scale(${fullScreenScale})` }}
+             onClick={(e) => {
+               if (fullScreenScale > 1) {
+                  // If zoomed in, allow clicking background to close might be annoying, 
+                  // but here we only close if clicking the actual image container?
+               }
+             }}
+           >
+             <img 
+               src={fullScreenImage} 
+               alt="Fullscreen preview" 
+               className={`max-w-full max-h-[90vh] object-contain drop-shadow-2xl ${addPdfBorder ? 'border-[4px] border-black ring-2 ring-white/15' : ''}`} 
+               draggable={false}
+             />
+           </div>
+         </div>
+      </div>
+    );
+  };
 
   if (appState === 'filter' && croppedImage) {
     return (
@@ -1746,21 +1816,24 @@ export default function App() {
            ))}
          </div>
          
-         <div className={`p-4 border-t flex justify-center space-x-4 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-[var(--color-warm-card)] border-[var(--color-warm-border)]'}`}>
-            <button 
-              onClick={() => fileInputGalleryRef2.current?.click()}
-              className={`flex items-center space-x-2 px-6 py-3 rounded-full font-medium transition-colors ${theme === 'dark' ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)] hover:bg-[var(--color-warm-border)]'}`}
-            >
-              <ImageIcon className="w-5 h-5" />
-            </button>
-            <button 
-              onClick={() => fileInputCameraRef2.current?.click()}
-              className={`flex items-center space-x-2 px-6 py-3 rounded-full font-medium shadow-md transition-colors flex-1 justify-center max-w-xs ${theme === 'dark' ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-[var(--color-warm-accent)] text-white hover:opacity-90'}`}
-            >
-              <Camera className="w-5 h-5" />
-              <span>Scan Page</span>
-            </button>
-         </div>
+          <div className={`p-4 border-t ${theme === "dark" ? "bg-slate-900 border-slate-800" : "bg-[var(--color-warm-card)] border-[var(--color-warm-border)]"}`}>
+            <div className="flex items-center justify-center space-x-3 w-full">
+              <button 
+                onClick={() => fileInputCameraRef2.current?.click()}
+                className="flex-1 flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-xl shadow-lg transition-all active:scale-95"
+              >
+                <Camera className="w-5 h-5" />
+                <span className="font-bold text-sm">Scan Page</span>
+              </button>
+              <button 
+                onClick={() => fileInputGalleryRef2.current?.click()}
+                className={`flex-1 flex items-center justify-center space-x-2 px-4 py-3 rounded-xl shadow-md transition-all active:scale-95 ${theme === "dark" ? "bg-slate-800 text-white hover:bg-slate-700 border border-slate-700" : "bg-white text-gray-700 hover:bg-gray-50 border border-gray-200"}`}
+              >
+                <ImageIcon className="w-5 h-5" />
+                <span className="font-bold text-sm">Upload</span>
+              </button>
+            </div>
+          </div>
          <input 
             type="file" 
             accept="image/*"
@@ -1778,27 +1851,9 @@ export default function App() {
             onChange={handleCapture}
          />
          {renderExportModal()}
-         {renderBatchProgressOverlay() } {false && (
-           <div className="absolute inset-0 bg-white/80 z-50 flex flex-col items-center justify-center">
-             <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-             <p className="mt-4 font-medium text-gray-800">Processing Document...</p>
-           </div>
-         )}
-         {renderCustomDialogs()}
-         {fullScreenImage && (
-           <div className="fixed inset-0 bg-black/95 z-[100] flex flex-col items-center justify-center animate-in fade-in duration-200">
-              <button 
-                onClick={() => setFullScreenImage(null)} 
-                className="absolute top-4 right-4 p-2 text-white/70 hover:text-white bg-black/50 hover:bg-black/80 rounded-full transition-colors z-[110]"
-                title="Close"
-              >
-                <X className="w-6 h-6" />
-              </button>
-              <div className="w-full h-full p-4 flex items-center justify-center cursor-zoom-out" onClick={() => setFullScreenImage(null)}>
-                <img src={fullScreenImage} alt="Fullscreen preview" className={`max-w-full max-h-full object-contain drop-shadow-2xl transition-all duration-150 ${addPdfBorder ? 'border-[4px] border-black ring-2 ring-white/15' : ''}`} />
-              </div>
-           </div>
-         )}
+          {renderBatchProgressOverlay()}
+          {renderCustomDialogs()}
+          {renderFullScreenImageOverlay()}
       </div>
     );
   }
@@ -2592,20 +2647,7 @@ export default function App() {
 
       {renderCustomDialogs()}
 
-      {fullScreenImage && (
-        <div className="fixed inset-0 bg-black/95 z-[100] flex flex-col items-center justify-center animate-in fade-in duration-200">
-           <button 
-             onClick={() => setFullScreenImage(null)} 
-             className="absolute top-4 right-4 p-2 text-white/70 hover:text-white bg-black/50 hover:bg-black/80 rounded-full transition-colors z-10"
-             title="Close"
-           >
-             <X className="w-6 h-6" />
-           </button>
-           <div className="w-full h-full p-4 flex items-center justify-center cursor-zoom-out" onClick={() => setFullScreenImage(null)}>
-             <img src={fullScreenImage} alt="Fullscreen preview" className={`max-w-full max-h-full object-contain drop-shadow-2xl transition-all duration-150 ${addPdfBorder ? 'border-[4px] border-black ring-2 ring-white/15' : ''}`} />
-           </div>
-        </div>
-      )}
+      {renderFullScreenImageOverlay()}
 
       {/* Modals */}
       {activeActionDocId && (
@@ -2616,14 +2658,15 @@ export default function App() {
               type="text"
               value={tempTitle}
               onChange={(e) => setTempTitle(e.target.value)}
-              className={`w-full border px-3 py-2 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-6 ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-gray-200'}`}
+              className={`w-full border rounded-xl px-4 py-3 mb-6 focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-gray-50 border-gray-200'}`}
+              placeholder="Enter new title..."
               autoFocus
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
-                  const doc = documents.find(d => d.id === activeActionDocId);
-                  if (doc) handleRenameDoc(doc, tempTitle || doc.title);
-                  setActiveActionDocId(null);
-                } else if (e.key === 'Escape') setActiveActionDocId(null);
+                   const doc = documents.find(d => d.id === activeActionDocId);
+                   if (doc) handleRenameDoc(doc, tempTitle || doc.title);
+                   setActiveActionDocId(null);
+                }
               }}
             />
             <div className="flex justify-end space-x-3">

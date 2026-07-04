@@ -133,6 +133,10 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
     if (isProcessing) return;
     e.preventDefault();
     setDraggingIdx(idx);
+    // Vibrate on touch if supported
+    if (window.navigator.vibrate) {
+      window.navigator.vibrate(10);
+    }
   };
 
   const handlePointerMove = useCallback((e: PointerEvent) => {
@@ -187,13 +191,14 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
       <div
         key={i}
         onPointerDown={handlePointerDown(i)}
-        className="absolute w-8 h-8 bg-blue-500 rounded-full border-2 border-white shadow-lg cursor-move transform -translate-x-1/2 -translate-y-1/2 touch-none"
+        className="absolute w-12 h-12 flex items-center justify-center cursor-move transform -translate-x-1/2 -translate-y-1/2 touch-none select-none z-[100]"
         style={{
           left: `${c.x * scaleX}px`,
           top: `${c.y * scaleY}px`,
-          zIndex: 10
         }}
-      />
+      >
+        <div className={`w-8 h-8 rounded-full border-2 border-white shadow-lg transition-transform ${draggingIdx === i ? 'bg-blue-400 scale-125' : 'bg-blue-600'}`} />
+      </div>
     ));
   };
 
@@ -268,25 +273,43 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
   return (
     <div className="flex flex-col h-[100dvh] bg-gray-900 text-white overflow-hidden relative">
       <div className="flex items-center justify-between p-4 bg-black z-20">
-        <button 
-          onClick={onCancel} 
-          disabled={isProcessing} 
-          className="px-4 py-2 text-gray-300 disabled:opacity-50"
-        >
-          Cancel
-        </button>
-        <h2 className="text-lg font-medium">Adjust Crop</h2>
+        <div className="flex items-center space-x-2">
+          <button 
+            onClick={onCancel} 
+            disabled={isProcessing} 
+            className="px-3 py-1 text-gray-300 disabled:opacity-50 text-sm"
+          >
+            Cancel
+          </button>
+          <button 
+            onClick={() => {
+              const marginX = imageSize.naturalWidth * 0.1;
+              const marginY = imageSize.naturalHeight * 0.1;
+              setCorners([
+                { x: marginX, y: marginY },
+                { x: imageSize.naturalWidth - marginX, y: marginY },
+                { x: imageSize.naturalWidth - marginX, y: imageSize.naturalHeight - marginY },
+                { x: marginX, y: imageSize.naturalHeight - marginY }
+              ]);
+            }}
+            disabled={isProcessing}
+            className="px-3 py-1 text-gray-400 text-xs border border-gray-800 rounded-md hover:bg-gray-900"
+          >
+            Reset
+          </button>
+        </div>
+        <h2 className="text-sm font-medium text-gray-400 absolute left-1/2 -translate-x-1/2 pointer-events-none">Adjust Crop</h2>
         <button 
           onClick={() => onCrop(corners)} 
           disabled={isProcessing} 
-          className="px-4 py-2 text-blue-400 font-medium disabled:opacity-50"
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-sm shadow-lg active:scale-95 transition-all disabled:opacity-50"
         >
           Next
         </button>
       </div>
       
-      <div className="flex-1 relative flex items-center justify-center p-8 pb-16" ref={containerRef}>
-        <div className="relative inline-block">
+      <div className={`flex-1 relative flex items-center justify-center p-8 pb-16 touch-none ${draggingIdx !== null ? 'cursor-grabbing' : 'cursor-auto'}`} ref={containerRef}>
+        <div className="relative inline-block select-none">
           <img
             ref={imageRef}
             src={imageSrc}
