@@ -20,6 +20,7 @@ export interface Document {
   pin?: string;
   isLocked?: boolean;
   isTrash?: boolean;
+  trashedAt?: number;
 }
 
 export interface Folder {

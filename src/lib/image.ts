@@ -71,7 +71,7 @@ async function getExifOrientation(src: string): Promise<number> {
   }
 }
 
-export async function downscaleImage(src: string, maxDim: number = 2000): Promise<string> {
+export async function downscaleImage(src: string, maxDim: number = 2400): Promise<string> {
   let orientation = -1;
   try {
     orientation = await getExifOrientation(src);
@@ -155,7 +155,7 @@ export async function downscaleImage(src: string, maxDim: number = 2000): Promis
       }
       
       ctx.drawImage(img, 0, 0, width, height);
-      resolve(canvas.toDataURL('image/jpeg', 0.8));
+      resolve(canvas.toDataURL('image/jpeg', 0.95));
     };
     img.onerror = () => reject(new Error("Failed to load image for downscaling"));
     img.src = src;
@@ -239,7 +239,7 @@ export async function warpPerspective(
       const dsize = new cv.Size(dstW, dstH);
       cv.warpPerspective(srcMat, dstMat, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
       cv.imshow(dstCanvas, dstMat);
-      return dstCanvas.toDataURL('image/jpeg', 0.9);
+      return dstCanvas.toDataURL('image/jpeg', 0.95);
     } catch (err) {
       console.warn("OpenCV warpPerspective failed, falling back to pure JS:", err);
     } finally {
@@ -316,59 +316,7 @@ export async function warpPerspective(
   }
   
   dstCtx.putImageData(dstImgData, 0, 0);
-  return dstCanvas.toDataURL('image/jpeg', 0.9);
-}
-
-function boxBlur(imageData: ImageData, radius: number) {
-  const data = imageData.data;
-  const width = imageData.width;
-  const height = imageData.height;
-  
-  const temp = new Uint8ClampedArray(data.length);
-  temp.set(data);
-  
-  // Horizontal pass
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let rSum = 0, gSum = 0, bSum = 0, count = 0;
-      for (let dx = -radius; dx <= radius; dx++) {
-        const nx = x + dx;
-        if (nx >= 0 && nx < width) {
-          const idx = (y * width + nx) * 4;
-          rSum += temp[idx];
-          gSum += temp[idx + 1];
-          bSum += temp[idx + 2];
-          count++;
-        }
-      }
-      const destIdx = (y * width + x) * 4;
-      data[destIdx] = Math.round(rSum / count);
-      data[destIdx + 1] = Math.round(gSum / count);
-      data[destIdx + 2] = Math.round(bSum / count);
-    }
-  }
-  
-  // Vertical pass
-  temp.set(data);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let rSum = 0, gSum = 0, bSum = 0, count = 0;
-      for (let dy = -radius; dy <= radius; dy++) {
-        const ny = y + dy;
-        if (ny >= 0 && ny < height) {
-          const idx = (ny * width + x) * 4;
-          rSum += temp[idx];
-          gSum += temp[idx + 1];
-          bSum += temp[idx + 2];
-          count++;
-        }
-      }
-      const destIdx = (y * width + x) * 4;
-      data[destIdx] = Math.round(rSum / count);
-      data[destIdx + 1] = Math.round(gSum / count);
-      data[destIdx + 2] = Math.round(bSum / count);
-    }
-  }
+  return dstCanvas.toDataURL('image/jpeg', 0.95);
 }
 
 export async function applyFilter(
@@ -411,7 +359,7 @@ export async function applyFilter(
   adjCtx.drawImage(rotCanvas, 0, 0);
 
   if (filterType === 'original') {
-    return adjCanvas.toDataURL('image/jpeg', 0.9);
+    return adjCanvas.toDataURL('image/jpeg', 0.95);
   } else if (filterType === 'photo') {
     const photoCanvas = document.createElement('canvas');
     photoCanvas.width = adjCanvas.width;
@@ -419,11 +367,11 @@ export async function applyFilter(
     const photoCtx = photoCanvas.getContext('2d')!;
     photoCtx.filter = 'saturate(1.1) contrast(1.05)';
     photoCtx.drawImage(adjCanvas, 0, 0);
-    return photoCanvas.toDataURL('image/jpeg', 0.9);
+    return photoCanvas.toDataURL('image/jpeg', 0.95);
   }
 
   // 3. Document / BW / Magic Color modes
-  const scale = 0.1;
+  const scale = 0.05; // 5% scale for a VERY broad illumination map
   const smallW = Math.max(1, Math.floor(adjCanvas.width * scale));
   const smallH = Math.max(1, Math.floor(adjCanvas.height * scale));
   
@@ -432,51 +380,97 @@ export async function applyFilter(
   smallCanvas.height = smallH;
   const smallCtx = smallCanvas.getContext('2d')!;
   
-  // Use pure-JS boxBlur for 100% cross-browser reliability instead of unstable ctx.filter
+  smallCtx.filter = 'blur(4px)'; // roughly 80px blur on original
   smallCtx.drawImage(adjCanvas, 0, 0, smallW, smallH);
-  const smallImgData = smallCtx.getImageData(0, 0, smallW, smallH);
-  boxBlur(smallImgData, 3);
-  smallCtx.putImageData(smallImgData, 0, 0);
   
-  smallCtx.globalCompositeOperation = 'difference';
-  smallCtx.fillStyle = 'white';
-  smallCtx.fillRect(0, 0, smallW, smallH);
+  // We need the illumination map. Let's just scale it back up.
+  const blurCanvas = document.createElement('canvas');
+  blurCanvas.width = adjCanvas.width;
+  blurCanvas.height = adjCanvas.height;
+  const blurCtx = blurCanvas.getContext('2d')!;
+  blurCtx.imageSmoothingEnabled = true;
+  blurCtx.imageSmoothingQuality = 'high';
+  blurCtx.drawImage(smallCanvas, 0, 0, smallW, smallH, 0, 0, adjCanvas.width, adjCanvas.height);
+  const illumImageData = blurCtx.getImageData(0, 0, adjCanvas.width, adjCanvas.height);
+  const illumData = illumImageData.data;
+
+  // Unsharp mask canvas
+  const usmCanvas = document.createElement('canvas');
+  usmCanvas.width = adjCanvas.width;
+  usmCanvas.height = adjCanvas.height;
+  const usmCtx = usmCanvas.getContext('2d')!;
+  usmCtx.filter = 'blur(2px)';
+  usmCtx.drawImage(adjCanvas, 0, 0);
+  const usmImageData = usmCtx.getImageData(0, 0, adjCanvas.width, adjCanvas.height);
+  const usmData = usmImageData.data;
+
+  const origImageData = adjCtx.getImageData(0, 0, adjCanvas.width, adjCanvas.height);
+  const origData = origImageData.data;
   
   const normalizedCanvas = document.createElement('canvas');
   normalizedCanvas.width = adjCanvas.width;
   normalizedCanvas.height = adjCanvas.height;
   const normCtx = normalizedCanvas.getContext('2d')!;
-  
-  normCtx.drawImage(adjCanvas, 0, 0);
-  normCtx.globalCompositeOperation = 'color-dodge';
-  normCtx.imageSmoothingEnabled = true;
-  normCtx.imageSmoothingQuality = 'high';
-  normCtx.drawImage(smallCanvas, 0, 0, smallW, smallH, 0, 0, adjCanvas.width, adjCanvas.height);
-  
-  const imageData = normCtx.getImageData(0, 0, adjCanvas.width, adjCanvas.height);
-  const data = imageData.data;
-  
-  let blackPoint = 80; 
-  let whitePoint = 220; 
+  const outImageData = normCtx.createImageData(adjCanvas.width, adjCanvas.height);
+  const data = outImageData.data;
+
+  let blackPoint = 60; 
+  let whitePoint = 230; 
   
   if (filterType === 'magic') {
-     blackPoint = 40; 
-     whitePoint = 245; 
+     blackPoint = 50; 
+     whitePoint = 190; 
   } else if (filterType === 'bw') {
-     blackPoint = 120;
-     whitePoint = 200;
+     blackPoint = 100;
+     whitePoint = 180;
   }
   
   const range = whitePoint - blackPoint;
   
   for (let i = 0; i < data.length; i += 4) {
-     let r = data[i];
-     let g = data[i+1];
-     let b = data[i+2];
+     let r0 = origData[i];
+     let g0 = origData[i+1];
+     let b0 = origData[i+2];
+
+     let ur = usmData[i];
+     let ug = usmData[i+1];
+     let ub = usmData[i+2];
+
+     // Apply USM (Sharpening)
+     let sharpenAmount = filterType === 'magic' ? 1.5 : (filterType === 'bw' ? 2.0 : 1.0);
+     let r = r0 + (r0 - ur) * sharpenAmount;
+     let g = g0 + (g0 - ug) * sharpenAmount;
+     let b = b0 + (b0 - ub) * sharpenAmount;
+     r = Math.max(0, Math.min(255, r));
+     g = Math.max(0, Math.min(255, g));
+     b = Math.max(0, Math.min(255, b));
      
-     let lum = r * 0.299 + g * 0.587 + b * 0.114;
+     let ir = illumData[i];
+     let ig = illumData[i+1];
+     let ib = illumData[i+2];
+     
+     let illumLum = ir * 0.299 + ig * 0.587 + ib * 0.114;
+     let origLum = r * 0.299 + g * 0.587 + b * 0.114;
      let chroma = Math.max(r, g, b) - Math.min(r, g, b);
 
+     // Heuristic to detect photos vs background
+     let illumBlend = (illumLum - 50) / (130 - 50);
+     // Boost blend for low-chroma pixels (gray shadows) to ensure they are flattened
+     if (chroma < 20) {
+        illumBlend += (20 - chroma) / 40; 
+     }
+     illumBlend = Math.max(0, Math.min(1, illumBlend));
+     
+     let factorR = (255 / Math.max(ir, 1)) * illumBlend + 1.0 * (1 - illumBlend);
+     let factorG = (255 / Math.max(ig, 1)) * illumBlend + 1.0 * (1 - illumBlend);
+     let factorB = (255 / Math.max(ib, 1)) * illumBlend + 1.0 * (1 - illumBlend);
+     
+     let dr = Math.min(255, r * factorR);
+     let dg = Math.min(255, g * factorG);
+     let db = Math.min(255, b * factorB);
+     
+     let lum = dr * 0.299 + dg * 0.587 + db * 0.114;
+     
      if (filterType === 'bw') {
         let v = 0;
         if (lum < blackPoint) v = 0;
@@ -486,10 +480,11 @@ export async function applyFilter(
         data[i] = v;
         data[i+1] = v;
         data[i+2] = v;
+        data[i+3] = 255;
      } else if (filterType === 'magic') {
         // MAGIC FILTER: Preserve colors, whiten background
         // Colorful pixels (stamps, photos) get protection from aggressive whitening
-        const protection = Math.min(70, chroma * 2.0);
+        const protection = Math.min(90, chroma * 3.0);
         const activeWhitePoint = Math.min(255, whitePoint + protection);
         
         if (lum > activeWhitePoint) {
@@ -497,46 +492,43 @@ export async function applyFilter(
            data[i+1] = 255;
            data[i+2] = 255;
         } else {
-           // Smooth transition near the white point to prevent harsh edges
            let whiteFactor = 1.0;
-           if (lum > activeWhitePoint - 20) {
-               whiteFactor = (activeWhitePoint - lum) / 20;
+           if (lum > activeWhitePoint - 15) {
+               whiteFactor = (activeWhitePoint - lum) / 15;
            }
 
-           // Reduce black point influence for colorful pixels to keep ink colors rich
-           const adjustedBlackPoint = blackPoint * Math.max(0, 1 - (chroma / 30));
+           const adjustedBlackPoint = blackPoint * Math.max(0, 1 - (chroma / 40));
            const currentRange = activeWhitePoint - adjustedBlackPoint;
            
            let s = (lum - adjustedBlackPoint) * 255 / (currentRange || 1);
            s = Math.min(255, Math.max(0, s));
            
-           // Boost saturation and maintain color ratio
-           const satBoost = 1.25;
+           const satBoost = 1.35;
            const ratio = s / (lum || 1);
            
-           let nr = (r * ratio - s) * satBoost + s;
-           let ng = (g * ratio - s) * satBoost + s;
-           let nb = (b * ratio - s) * satBoost + s;
+           let nr = (dr * ratio - s) * satBoost + s;
+           let ng = (dg * ratio - s) * satBoost + s;
+           let nb = (db * ratio - s) * satBoost + s;
            
-           // Blend towards white for background areas
            data[i] = Math.min(255, Math.max(0, nr * whiteFactor + 255 * (1 - whiteFactor)));
            data[i+1] = Math.min(255, Math.max(0, ng * whiteFactor + 255 * (1 - whiteFactor)));
            data[i+2] = Math.min(255, Math.max(0, nb * whiteFactor + 255 * (1 - whiteFactor)));
         }
+        data[i+3] = 255;
      } else { // 'document'
-        // DOCUMENT FILTER: Balanced contrast and color
         let s = (lum - blackPoint) * 255 / range;
         s = Math.min(255, Math.max(0, s));
         const ratio = s / (lum || 1);
         
-        data[i] = Math.min(255, Math.max(0, r * ratio));
-        data[i+1] = Math.min(255, Math.max(0, g * ratio));
-        data[i+2] = Math.min(255, Math.max(0, b * ratio));
+        data[i] = Math.min(255, Math.max(0, dr * ratio));
+        data[i+1] = Math.min(255, Math.max(0, dg * ratio));
+        data[i+2] = Math.min(255, Math.max(0, db * ratio));
+        data[i+3] = 255;
      }
   }
   
-  normCtx.putImageData(imageData, 0, 0);
-  return normalizedCanvas.toDataURL('image/jpeg', 0.9);
+  normCtx.putImageData(outImageData, 0, 0);
+  return normalizedCanvas.toDataURL('image/jpeg', 0.95);
 }
 
 function getCornerAngle(p0: Point, p1: Point, p2: Point): number {
@@ -860,7 +852,7 @@ function extractBestQuadrilateral(
   }
 }
 
-function detectDocumentCornersOpenCV(img: HTMLImageElement | HTMLCanvasElement): Point[] | null {
+function detectDocumentCornersOpenCV(img: HTMLImageElement): Point[] | null {
   const cv = (window as any).cv;
   if (!cv || !cv.Mat) {
     console.log("OpenCV.js not loaded yet or unavailable.");
@@ -1034,7 +1026,7 @@ function detectDocumentCornersOpenCV(img: HTMLImageElement | HTMLCanvasElement):
   return null;
 }
 
-export function detectDocumentCorners(img: HTMLImageElement | HTMLCanvasElement): Point[] | null {
+export function detectDocumentCorners(img: HTMLImageElement): Point[] | null {
   // First, attempt to detect using OpenCV.js if loaded and highly confident.
   try {
     const cvCorners = detectDocumentCornersOpenCV(img);

@@ -1,5 +1,6 @@
+import { convertFilesToImageFiles } from "./lib/fileImport";
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Camera, Image as ImageIcon, Plus, FileText, ChevronRight, ChevronDown, Download, Trash2, ArrowLeft, Share2, CheckSquare, Square, X, ArrowDownUp, LayoutGrid, List as ListIcon, FolderInput, FolderPlus, Combine, Pencil, Check, Search, ArrowUp, ArrowDown, GripVertical, Home, StickyNote, User, Settings, Sun, Moon, Crop, MoreVertical, Lock, Unlock, FileArchive, FolderOpen, Mail, Undo, ZoomIn, ZoomOut } from 'lucide-react';
+import { FileDown, Camera, Image as ImageIcon, Plus, FileText, ChevronRight, Download, Trash2, ArrowLeft, Share2, CheckSquare, Square, X, ArrowDownUp, LayoutGrid, List as ListIcon, FolderInput, FolderPlus, Combine, Pencil, Check, Search, ArrowUp, ArrowDown, GripVertical, Home, StickyNote, User, Settings, Sun, Moon, Crop, MoreVertical, Lock, Unlock, FileArchive, FolderOpen, Mail, Undo, ZoomIn, ZoomOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { getDocuments, saveDocument, deleteDocument, getFolders, saveFolder, deleteFolder } from './lib/store';
 import { Document, DocumentPage, Point, FilterType, Folder, QueueItem, WatermarkOptions } from './types';
@@ -8,15 +9,6 @@ import FilterView from './components/FilterView';
 import { warpPerspective, downscaleImage, detectDocumentCorners, applyFilter, loadImage, addWatermarkToImage } from './lib/image';
 import { generatePDF } from './lib/pdf';
 import JSZip from 'jszip';
-
-import ZoomableImage from './components/ZoomableImage';
-import CameraView from "./components/CameraView";
-
-
-const isAndroidWebView = () => {
-  const ua = navigator.userAgent.toLowerCase();
-  return ua.includes("wv") || (ua.includes("android") && ua.includes("median"));
-};
 
 type AppState = 'home' | 'view_doc' | 'crop' | 'filter';
 type SortOrder = 'newest' | 'oldest' | 'alpha';
@@ -113,9 +105,6 @@ export default function App() {
   const [watermarkPosition, setWatermarkPosition] = useState<'center' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'>('center');
   const [watermarkRotation, setWatermarkRotation] = useState<number>(0);
   const [watermarkMargin, setWatermarkMargin] = useState<number>(20);
-  const [showCustomCamera, setShowCustomCamera] = useState(false);
-  const [cameraMode, setCameraMode] = useState<"single"|"batch">("single");
-
 
   // Notes state
   const [noteSearchQuery, setNoteSearchQuery] = useState('');
@@ -123,7 +112,6 @@ export default function App() {
     try {
       const stored = localStorage.getItem('docscanner_quick_notes');
       return stored ? JSON.parse(stored) : [
-
         { id: '1', title: 'Receipt Scan To-Do', content: 'Remember to group receipt scans by month. Put restaurant receipts in the "Expenses" folder.', createdAt: Date.now() - 3600000 * 2, colorIndex: 0 },
         { id: '2', title: 'Meeting Notes Checklist', content: 'After scanning meeting notes, tap on "Filter" and choose the "Magic" filter. It makes the black pen text pop perfectly on white paper!', createdAt: Date.now() - 3600000 * 12, colorIndex: 1 }
       ];
@@ -142,6 +130,19 @@ export default function App() {
   const [newNoteColor, setNewNoteColor] = useState(0);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
 
+
+  const [autoCleanupDays, setAutoCleanupDays] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem('docscanner_cleanup');
+      return stored ? parseInt(stored, 10) : 30;
+    } catch {
+      return 30;
+    }
+  });
+
+  useEffect(() => {
+    localStorage.setItem('docscanner_cleanup', autoCleanupDays.toString());
+  }, [autoCleanupDays]);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
       const stored = localStorage.getItem('docscanner_theme');
@@ -451,35 +452,84 @@ export default function App() {
     getFolders().then(setFolders);
   }, []);
 
-  const handleCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []) as File[];
-    handleFilesSelected(files);
-    e.target.value = "";
-  };
-  const handleFilesSelected = async (files: File[]) => {
-    if (files.length === 0) return;
+  
+  
+  useEffect(() => {
+    // Handle files shared via share_target (mobile)
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'SHARED_FILES') {
+        const files = event.data.files as File[];
+        if (files && files.length > 0) {
+          processIncomingFiles(files);
+        }
+      }
+    };
     
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleMessage);
+      
+      // Tell SW we are ready to receive any pending shared files
+      if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'APP_READY' });
+      }
+    }
+
+    // Handle files opened via file_handlers (desktop)
+    if ('launchQueue' in window) {
+      (window as any).launchQueue.setConsumer(async (launchParams: any) => {
+        if (launchParams.files && launchParams.files.length > 0) {
+          const files: File[] = [];
+          for (const handle of launchParams.files) {
+            const file = await handle.getFile();
+            files.push(file);
+          }
+          if (files.length > 0) {
+            processIncomingFiles(files);
+          }
+        }
+      });
+    }
+
+    return () => {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleMessage);
+      }
+    };
+  }, []);
+  
+const processIncomingFiles = async (rawFiles: File[]) => {
+    if (rawFiles.length === 0) return;
+    setIsProcessingBatch(true);
+    setTotalBatchFiles(rawFiles.length);
+    setProcessedBatchFiles(0);
+    
+    // Check if we need to convert PDFs to images
+    const files = await convertFilesToImageFiles(rawFiles, (msg) => {
+      // We can use an existing progress text state, or just console.log
+      console.log(msg);
+    });
+
+    if (files.length === 0) {
+      setIsProcessingBatch(false);
+      return;
+    }
+
     setTotalBatchFiles(files.length);
     setProcessedBatchFiles(0);
-    setIsProcessingBatch(true);
     
-    // Helper to process a single file: read, downscale, load, and detect corners
     const processFile = async (file: File): Promise<QueueItem | null> => {
       let objectUrl: string | null = null;
       try {
         objectUrl = URL.createObjectURL(file);
-
         if (!objectUrl) {
           setProcessedBatchFiles(prev => Math.min(prev + 1, files.length));
           return null;
         }
 
-        // Downscale to 2400 max dimension
         let finalUrl = '';
         try {
            finalUrl = await downscaleImage(objectUrl, 2400);
         } catch (e) {
-           // Fallback to Data URL if downscale fails so we don't return a revoked Object URL
            finalUrl = await new Promise<string>((resolve) => {
              const reader = new FileReader();
              reader.onload = (e) => resolve((e.target?.result as string) || '');
@@ -487,11 +537,9 @@ export default function App() {
            });
         }
 
-        // Load image to run corner detection
         const img = await loadImage(finalUrl);
         let corners = detectDocumentCorners(img);
         
-        // If detection fails, provide default corners (10% margin) so the page is still processed
         if (!corners) {
           const marginW = img.width * 0.1;
           const marginH = img.height * 0.1;
@@ -506,10 +554,7 @@ export default function App() {
         if (objectUrl) URL.revokeObjectURL(objectUrl);
 
         setProcessedBatchFiles(prev => Math.min(prev + 1, files.length));
-        return {
-          url: finalUrl,
-          corners: corners
-        };
+        return { url: finalUrl, corners: corners };
       } catch (err) {
         console.error("Error processing file in queue:", err);
         if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -518,22 +563,16 @@ export default function App() {
       }
     };
 
-    // Process files sequentially to prevent main-thread congestion and memory spikes
     const runInQueue = async (files: File[], limit: number): Promise<QueueItem[]> => {
       const results = new Array<QueueItem | null>(files.length).fill(null);
       let index = 0;
-
       const worker = async () => {
         while (index < files.length) {
           const currentIndex = index++;
-          const file = files[currentIndex];
-          const res = await processFile(file);
-          results[currentIndex] = res;
-          // Small breathing room for GC
+          results[currentIndex] = await processFile(files[currentIndex]);
           await new Promise(r => setTimeout(r, 100));
         }
       };
-
       const workers = Array(Math.min(limit, files.length)).fill(null).map(worker);
       await Promise.all(workers);
       return results.filter((item): item is QueueItem => item !== null);
@@ -547,18 +586,24 @@ export default function App() {
         setProcessingQueue(results.slice(1));
         setAppState('crop');
       } else {
-        alert("Could not process the image. Please try again or use a different photo.");
+        alert("Could not process the files. Please try again.");
       }
     } catch (err) {
       console.error("Error processing captured batch:", err);
-      alert("Error processing the image.");
+      alert("Error processing the files.");
     } finally {
       setIsProcessingBatch(false);
-      
     }
   };
 
-  const handleCropNext = async (corners: Point[]) => {
+  const handleCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const inputElement = e.target;
+    const files = Array.from(inputElement.files || []) as File[];
+    await processIncomingFiles(files);
+    inputElement.value = '';
+  };
+
+const handleCropNext = async (corners: Point[]) => {
     try {
       if (!capturedImage) return;
       setIsProcessingStep(true);
@@ -709,7 +754,7 @@ export default function App() {
     try {
       const blob = await generatePDF(doc, { drawBorder: addPdfBorder });
       const file = new File([blob], `${doc.title}.pdf`, { type: 'application/pdf' });
-      if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
           title: doc.title,
@@ -755,7 +800,7 @@ export default function App() {
       } else {
         const confirmTrash = await showCustomConfirm(`Move "${doc.title}" to Trash?`);
         if (!confirmTrash) return;
-        const updatedDoc = { ...doc, isTrash: true };
+        const updatedDoc = { ...doc, isTrash: true, trashedAt: Date.now() };
         await saveDocument(updatedDoc);
         setDocuments(prev => prev.map(d => d.id === id ? updatedDoc : d));
       }
@@ -922,7 +967,7 @@ export default function App() {
           downloadFile(blob, `${doc.title}.pdf`);
         } else if (action === 'email') {
           // Check if we can share with files (preferred for attachments)
-          if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+          if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
             try {
               await navigator.share({
                 files: [file],
@@ -945,10 +990,10 @@ export default function App() {
           // Also download for easy attachment
           downloadFile(blob, `${doc.title}.pdf`);
           
-          showCustomAlert("Email opened. PDF saved to Downloads—please attach it manually.");
+          showCustomAlert("Email App Opened: Standard email links cannot attach files automatically. The PDF has been downloaded to your device so you can attach it to the email manually.");
         } else {
           try {
-            if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+            if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
               await navigator.share({
                 files: [file],
                 title: doc.title,
@@ -959,7 +1004,7 @@ export default function App() {
           } catch (shareErr) {
             // fallback
             downloadFile(blob, `${doc.title}.pdf`);
-            await showCustomAlert("PDF saved to Downloads. Please select it when sharing.");
+            await showCustomAlert("System sharing is not fully supported in this browser. The PDF has been downloaded to your device instead.");
           }
         }
       } catch (e) {
@@ -985,14 +1030,14 @@ export default function App() {
             return new File([blob], `${doc.title}_Page_${i + 1}.jpg`, { type: 'image/jpeg' });
           }));
           try {
-            if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files })) {
+            if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
               await navigator.share({ files, title: doc.title });
             } else {
               throw new Error("unsupported");
             }
           } catch (shareErr) {
             await handleDownloadImages(doc, watermarkConfig);
-            await showCustomAlert("Images saved to Downloads. Please select them when sharing.");
+            await showCustomAlert("System sharing is not fully supported in this browser. The images have been downloaded to your device instead.");
           }
         } catch (e) {
           console.error("Failed to share images", e);
@@ -1022,14 +1067,14 @@ export default function App() {
           const zipBlob = await zip.generateAsync({ type: 'blob' });
           const file = new File([zipBlob], `${doc.title}.zip`, { type: 'application/zip' });
           try {
-            if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+            if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
               await navigator.share({ files: [file], title: doc.title });
             } else {
               throw new Error("unsupported");
             }
           } catch (shareErr) {
             await handleDownloadZip(doc, watermarkConfig);
-            await showCustomAlert("ZIP file saved to Downloads. Please select it when sharing.");
+            await showCustomAlert("System sharing is not fully supported in this browser. The ZIP file has been downloaded to your device instead.");
           }
         } catch(e) {}
       }
@@ -1122,7 +1167,7 @@ export default function App() {
     } else {
       const confirmTrash = await showCustomConfirm(`Move ${docsToProcess.length} selected documents to Trash?`);
       if (!confirmTrash) return;
-      await Promise.all(docsToProcess.map(d => saveDocument({ ...d, isTrash: true })));
+      await Promise.all(docsToProcess.map(d => saveDocument({ ...d, isTrash: true, trashedAt: Date.now() })));
     }
 
     const freshDocs = await getDocuments();
@@ -1141,7 +1186,7 @@ export default function App() {
        }));
        
        try {
-          if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files })) {
+          if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
              await navigator.share({
                 files,
                 title: "Shared Documents",
@@ -1154,7 +1199,7 @@ export default function App() {
              const blob = await generatePDF(doc, { drawBorder: addPdfBorder });
              downloadFile(blob, `${doc.title}.pdf`);
           }
-          await showCustomAlert("PDFs saved to Downloads. Please select them when sharing.");
+          await showCustomAlert("System sharing is not fully supported in this browser. The PDFs have been downloaded to your device instead.");
        }
     } catch (e: any) {
        if (e.name !== 'AbortError') {
@@ -1164,7 +1209,38 @@ export default function App() {
     }
   };
 
-  const handleMergeSelected = async () => {
+  
+  const handleDownloadCombinedPDF = async () => {
+    const docsToMerge = documents.filter(d => selectedDocs.has(d.id));
+    if (docsToMerge.length === 0) return;
+    
+    docsToMerge.sort((a, b) => a.createdAt - b.createdAt);
+    const allPages = docsToMerge.flatMap(d => d.pages);
+    
+    if (allPages.length === 0) {
+      setErrorMessage("No pages to export.");
+      return;
+    }
+    
+    const combinedDoc = {
+      id: "combined-temp",
+      title: `Combined PDF ${new Date().toLocaleDateString()}`,
+      createdAt: Date.now(),
+      pages: allPages
+    };
+    
+    try {
+      const blob = await generatePDF(combinedDoc, { drawBorder: addPdfBorder });
+      downloadFile(blob, `Combined_PDF_${new Date().getTime()}.pdf`);
+      setIsMultiSelect(false);
+      setSelectedDocs(new Set());
+    } catch (e) {
+      console.error("Failed to generate combined PDF", e);
+      setErrorMessage("Could not generate combined PDF.");
+    }
+  };
+
+const handleMergeSelected = async () => {
     const docsToMerge = documents.filter(d => selectedDocs.has(d.id));
     if (docsToMerge.length < 2) return;
     
@@ -1196,7 +1272,7 @@ export default function App() {
       }));
 
       try {
-        if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files })) {
+        if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
           await navigator.share({
             files,
             title: doc.title,
@@ -1206,7 +1282,7 @@ export default function App() {
         }
       } catch (shareErr) {
         await handleDownloadImages(doc);
-        await showCustomAlert("Images saved to Downloads. Please select them when sharing.");
+        await showCustomAlert("System sharing is not fully supported in this browser. The images have been downloaded to your device instead.");
       }
     } catch (e: any) {
       if (e.name !== 'AbortError') {
@@ -1576,34 +1652,6 @@ export default function App() {
     );
   };
 
-  if (showCustomCamera) {
-    return (
-      <CameraView
-        initialMode={cameraMode}
-        onCapture={(files) => {
-          setShowCustomCamera(false);
-          handleFilesSelected(files);
-        }}
-        onClose={() => setShowCustomCamera(false)}
-        onPickGallery={() => {
-          if (cameraMode === "single") {
-            fileInputGalleryRef.current?.click();
-          } else {
-            fileInputGalleryRef2.current?.click();
-          }
-        }}
-        onFallback={() => {
-          setShowCustomCamera(false);
-          if (cameraMode === "single") {
-            fileInputCameraRef.current?.click();
-          } else {
-            fileInputCameraRef2.current?.click();
-          }
-        }}
-      />
-    );
-  }
-
   if (appState === 'crop' && capturedImage) {
     return (
       <CropView
@@ -1626,11 +1674,55 @@ export default function App() {
   const renderFullScreenImageOverlay = () => {
     if (!fullScreenImage) return null;
     return (
-      <ZoomableImage 
-        src={fullScreenImage} 
-        onClose={() => setFullScreenImage(null)} 
-        addPdfBorder={addPdfBorder} 
-      />
+      <div className="fixed inset-0 bg-black/95 z-[100] flex flex-col animate-in fade-in duration-200">
+         <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center z-[110] bg-gradient-to-b from-black/60 to-transparent">
+           <div className="flex items-center space-x-2">
+             <button 
+               onClick={() => setFullScreenScale(prev => Math.max(1, prev - 0.5))}
+               className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
+               title="Zoom Out"
+             >
+               <ZoomOut className="w-5 h-5" />
+             </button>
+             <span className="text-white/60 text-xs font-mono w-12 text-center">{Math.round(fullScreenScale * 100)}%</span>
+             <button 
+               onClick={() => setFullScreenScale(prev => Math.min(4, prev + 0.5))}
+               className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
+               title="Zoom In"
+             >
+               <ZoomIn className="w-5 h-5" />
+             </button>
+           </div>
+           <button 
+             onClick={() => { setFullScreenImage(null); setFullScreenScale(1); }} 
+             className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
+             title="Close"
+           >
+             <X className="w-6 h-6" />
+           </button>
+         </div>
+         
+          <div className="flex-1 overflow-auto p-4 touch-auto">
+            <div 
+              className="transition-all duration-200 ease-out flex items-center justify-center min-h-full min-w-full"
+              style={{ 
+                width: fullScreenScale > 1 ? `${fullScreenScale * 100}%` : "100%",
+                height: fullScreenScale > 1 ? `${fullScreenScale * 100}%` : "100%",
+              }}
+            >
+              <img 
+                src={fullScreenImage} 
+                alt="Fullscreen preview" 
+                style={{ 
+                  maxWidth: fullScreenScale > 1 ? "none" : "95vw",
+                  maxHeight: fullScreenScale > 1 ? "none" : "90vh",
+                }} 
+                className={`object-contain drop-shadow-2xl transition-all duration-200 ${addPdfBorder ? "border-[4px] border-black ring-2 ring-white/15" : ""}`} 
+                draggable={false}
+              />
+            </div>
+          </div>
+      </div>
     );
   };
 
@@ -1648,8 +1740,8 @@ export default function App() {
   if (appState === 'view_doc' && currentDoc) {
     return (
       <div className={`flex flex-col h-[100dvh] font-sans transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-950 text-white' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)]'}`}>
-         <div className={`flex items-center justify-between px-4 pb-5 safe-pt border-b sticky top-0 z-10 shadow-sm transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-[var(--color-warm-card)] border-[var(--color-warm-border)]'}`}>
-            <button onClick={() => { setCurrentDoc(null); setAppState('home'); setIsEditingTitle(false); }} className={`touch-target p-2 -ml-2 flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-text)]'}`}>
+         <div className={`flex items-center justify-between p-4 border-b sticky top-0 z-10 shadow-sm transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-[var(--color-warm-card)] border-[var(--color-warm-border)]'}`}>
+            <button onClick={() => { setCurrentDoc(null); setAppState('home'); setIsEditingTitle(false); }} className={`p-2 -ml-2 flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-text)]'}`}>
                <ArrowLeft className="w-6 h-6" />
             </button>
             
@@ -1666,10 +1758,10 @@ export default function App() {
                   className={`flex-1 border rounded-lg px-2.5 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-[var(--color-warm-accent)]'}`}
                   autoFocus
                 />
-                <button onClick={handleRenameSave} className={`touch-target p-1.5 rounded-lg flex-shrink-0 ${theme === 'dark' ? 'text-green-400 hover:bg-slate-800' : 'text-green-600 hover:bg-green-50'}`} title="Save Title">
+                <button onClick={handleRenameSave} className={`p-1.5 rounded-lg flex-shrink-0 ${theme === 'dark' ? 'text-green-400 hover:bg-slate-800' : 'text-green-600 hover:bg-green-50'}`} title="Save Title">
                   <Check className="w-5 h-5" />
                 </button>
-                <button onClick={() => setIsEditingTitle(false)} className={`touch-target p-1.5 rounded-lg flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-400 hover:bg-gray-100'}`} title="Cancel">
+                <button onClick={() => setIsEditingTitle(false)} className={`p-1.5 rounded-lg flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-400 hover:bg-gray-100'}`} title="Cancel">
                   <X className="w-5 h-5" />
                 </button>
               </div>
@@ -1678,7 +1770,7 @@ export default function App() {
                 <h1 className={`text-lg font-semibold truncate ${theme === 'dark' ? 'text-slate-200' : 'text-[var(--color-warm-text)]'}`}>{currentDoc.title}</h1>
                 <button 
                   onClick={() => { setTempTitle(currentDoc.title); setIsEditingTitle(true); }} 
-                  className={`touch-target p-1.5 ml-1 rounded-lg transition-colors flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:text-blue-400 hover:bg-slate-800' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-accent)] hover:bg-[var(--color-warm-border)]'}`}
+                  className={`p-1.5 ml-1 rounded-lg transition-colors flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:text-blue-400 hover:bg-slate-800' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-accent)] hover:bg-[var(--color-warm-border)]'}`}
                   title="Rename document"
                 >
                   <Pencil className="w-4 h-4" />
@@ -1815,7 +1907,7 @@ export default function App() {
                 </div>
                 <div className={`p-4 flex justify-center ${theme === 'dark' ? 'bg-slate-950/50' : 'bg-[var(--color-warm-bg)]'}`}>
                   <button onClick={() => setFullScreenImage(page.filteredImage)} className="cursor-zoom-in transition-transform hover:scale-[1.02]">
-                    <img src={page.filteredImage} alt={`Page ${idx+1}`} draggable={false} loading="lazy" decoding="async" className={`max-h-[60vh] object-contain shadow-md select-none transition-all duration-150 ${addPdfBorder ? 'border-[3px] border-black rounded-none ring-2 ring-black/10' : 'rounded-md'}`} />
+                    <img src={page.filteredImage} alt={`Page ${idx+1}`} draggable={false} className={`max-h-[60vh] object-contain shadow-md select-none transition-all duration-150 ${addPdfBorder ? 'border-[3px] border-black rounded-none ring-2 ring-black/10' : 'rounded-md'}`} />
                   </button>
                 </div>
              </div>
@@ -1825,7 +1917,7 @@ export default function App() {
           <div className={`p-4 border-t ${theme === "dark" ? "bg-slate-900 border-slate-800" : "bg-[var(--color-warm-card)] border-[var(--color-warm-border)]"}`}>
             <div className="flex items-center justify-center space-x-3 w-full">
               <button 
-                onClick={() => { setCameraMode("batch"); setShowCustomCamera(true); }}
+                onClick={() => fileInputCameraRef2.current?.click()}
                 className="flex-1 flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-xl shadow-lg transition-all active:scale-95"
               >
                 <Camera className="w-5 h-5" />
@@ -1842,7 +1934,7 @@ export default function App() {
           </div>
          <input 
             type="file" 
-            accept="image/*"
+            accept="image/*,application/pdf"
             multiple
             className="hidden" 
             ref={fileInputGalleryRef2}
@@ -1850,7 +1942,7 @@ export default function App() {
          />
          <input 
             type="file" 
-            accept="image/*"
+            accept="image/*,application/pdf"
             capture="environment" 
             className="hidden" 
             ref={fileInputCameraRef2}
@@ -2130,13 +2222,13 @@ export default function App() {
             <div className={`flex rounded-lg p-1 ${theme === 'dark' ? 'bg-slate-950' : 'bg-gray-100'}`}>
               <button 
                 onClick={() => setLayout('grid')} 
-                className={`touch-target p-1.5 rounded-md text-xs font-bold transition-all ${layout === 'grid' ? theme === 'dark' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}
+                className={`p-1.5 rounded-md text-xs font-bold transition-all ${layout === 'grid' ? theme === 'dark' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}
               >
                 Grid
               </button>
               <button 
                 onClick={() => setLayout('list')} 
-                className={`touch-target p-1.5 rounded-md text-xs font-bold transition-all ${layout === 'list' ? theme === 'dark' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}
+                className={`p-1.5 rounded-md text-xs font-bold transition-all ${layout === 'list' ? theme === 'dark' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}
               >
                 List
               </button>
@@ -2176,6 +2268,28 @@ export default function App() {
           </div>
         </div>
 
+        <div className={`rounded-2xl border p-5 shadow-xs space-y-4 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-gray-100 text-gray-900'}`}>
+          <h3 className={`font-bold text-sm ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>Preferences</h3>
+          
+          <div className={`flex items-center justify-between py-2`}>
+            <div>
+              <p className={`text-sm font-semibold ${theme === 'dark' ? 'text-slate-200' : 'text-gray-800'}`}>Trash Auto-Cleanup</p>
+              <p className={`text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-gray-400'}`}>Automatically empty trash.</p>
+            </div>
+            <select 
+              value={autoCleanupDays}
+              onChange={(e) => setAutoCleanupDays(parseInt(e.target.value, 10))}
+              className={`border text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500 ${theme === 'dark' ? 'bg-slate-950 border-slate-800 text-white' : 'bg-gray-50 border-gray-200 text-gray-800'}`}
+            >
+              <option value={0} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>Never</option>
+              <option value={7} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>7 days</option>
+              <option value={15} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>15 days</option>
+              <option value={30} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>30 days</option>
+              <option value={90} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>90 days</option>
+            </select>
+          </div>
+        </div>
+
         <div className={`rounded-2xl border p-5 shadow-xs space-y-3 text-center ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-100'}`}>
           <p className={`text-xs font-semibold ${theme === 'dark' ? 'text-slate-400' : 'text-gray-500'}`}>Local Storage Operations</p>
           <button 
@@ -2204,13 +2318,13 @@ export default function App() {
 
   // Home View
   return (
-    <div className={`flex flex-col h-[100dvh] font-sans relative ${theme === 'dark' ? 'bg-slate-950 text-white' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)]'}`}>
-      <div className={`px-4 pb-5 sm:px-6 border-b sticky top-0 safe-pt z-30 flex items-center justify-between transition-colors duration-300 backdrop-blur-xl ${theme === 'dark' ? 'bg-slate-900/90 border-slate-800 text-white' : 'bg-[var(--color-warm-card)]/90 border-[var(--color-warm-border)] shadow-sm'}`}>
+    <div className={`flex flex-col h-screen font-sans relative ${theme === 'dark' ? 'bg-slate-950 text-white' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)]'}`}>
+      <div className={`px-3 py-3 sm:px-6 border-b sticky top-0 z-30 flex items-center justify-between transition-colors duration-300 backdrop-blur-xl ${theme === 'dark' ? 'bg-slate-900/90 border-slate-800 text-white' : 'bg-[var(--color-warm-card)]/90 border-[var(--color-warm-border)] shadow-sm'}`}>
         {currentTab === 'home' ? (
           isMultiSelect ? (
           <>
             <div className="flex items-center space-x-2 min-w-0">
-              <button onClick={() => { setIsMultiSelect(false); setSelectedDocs(new Set()); }} className={`touch-target p-1.5 rounded-lg -ml-1 ${theme === 'dark' ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-[var(--color-warm-text)] hover:text-black hover:bg-[var(--color-warm-border)]'}`}>
+              <button onClick={() => { setIsMultiSelect(false); setSelectedDocs(new Set()); }} className={`p-1.5 rounded-lg -ml-1 ${theme === 'dark' ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-[var(--color-warm-text)] hover:text-black hover:bg-[var(--color-warm-border)]'}`}>
                 <X className="w-5 h-5" />
               </button>
               <h1 className={`text-base sm:text-lg font-bold truncate ${theme === 'dark' ? 'text-slate-200' : 'text-[var(--color-warm-text)]'}`}>{selectedDocs.size} Selected</h1>
@@ -2248,6 +2362,15 @@ export default function App() {
                  <FolderInput className="w-5 h-5" />
               </button>
               {selectedDocs.size > 1 && (
+                <>
+                
+                <button 
+                  onClick={handleDownloadCombinedPDF} 
+                  className={`p-2 rounded-full transition-all ${theme === 'dark' ? 'text-red-400 hover:bg-slate-800' : 'text-red-600 hover:bg-red-100'}`}
+                  title="Download as Combined PDF"
+                >
+                   <FileDown className="w-5 h-5" />
+                </button>
                 <button 
                   onClick={handleMergeSelected} 
                   className={`p-2 rounded-full transition-all ${theme === 'dark' ? 'text-blue-400 hover:bg-slate-800' : 'text-blue-600 hover:bg-blue-100'}`}
@@ -2255,6 +2378,7 @@ export default function App() {
                 >
                    <Combine className="w-5 h-5" />
                 </button>
+                </>
               )}
               <button 
                 onClick={handleShareSelected} 
@@ -2288,29 +2412,21 @@ export default function App() {
             </div>
             <div className="flex items-center space-x-2 flex-shrink-0">
               {documents.length > 0 && (
-                <div className={`flex rounded-lg p-0.5 border ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-200 shadow-xs'}`}>
-                   <button 
-                     onClick={() => setLayout('grid')} 
-                     className={`w-7 h-7 flex items-center justify-center rounded transition-all ${layout === 'grid' ? (theme === 'dark' ? 'bg-slate-800 text-blue-400' : 'bg-gray-100 text-blue-600') : 'text-gray-400 hover:text-gray-600'}`}
-                     title="Grid View"
-                   >
+                <div className={`flex rounded-lg p-0.5 ${theme === 'dark' ? 'bg-slate-800' : 'bg-[var(--color-warm-card)] shadow-sm backdrop-blur-md border border-[var(--color-warm-border)]'}`}>
+                   <button onClick={() => setLayout('grid')} className={`p-1 rounded ${layout === 'grid' ? theme === 'dark' ? 'bg-slate-700 text-blue-400 shadow-xs' : 'bg-[var(--color-warm-bg)] shadow-xs text-[var(--color-warm-accent)]' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-text)]'}`}>
                       <LayoutGrid className="w-3.5 h-3.5" />
                    </button>
-                   <button 
-                     onClick={() => setLayout('list')} 
-                     className={`w-7 h-7 flex items-center justify-center rounded transition-all ${layout === 'list' ? (theme === 'dark' ? 'bg-slate-800 text-blue-400' : 'bg-gray-100 text-blue-600') : 'text-gray-400 hover:text-gray-600'}`}
-                     title="List View"
-                   >
+                   <button onClick={() => setLayout('list')} className={`p-1 rounded ${layout === 'list' ? theme === 'dark' ? 'bg-slate-700 text-blue-400 shadow-xs' : 'bg-[var(--color-warm-bg)] shadow-xs text-[var(--color-warm-accent)]' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-text)]'}`}>
                       <ListIcon className="w-3.5 h-3.5" />
                    </button>
                 </div>
               )}
               <button 
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all active:scale-95 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-yellow-400 hover:bg-slate-800' : 'bg-white border-gray-200 text-gray-750 hover:bg-gray-50 shadow-xs'}`}
+                className={`p-1.5 rounded-full transition-all active:scale-95 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-[var(--color-warm-text-muted)] hover:bg-[var(--color-warm-border)]'}`}
                 title={theme === 'light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
               >
-                {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+                {theme === 'light' ? <Moon className="w-4.5 h-4.5" /> : <Sun className="w-4.5 h-4.5" />}
               </button>
             </div>
           </>
@@ -2321,7 +2437,7 @@ export default function App() {
               <h1 className={`text-xl sm:text-2xl font-black tracking-tight ${theme === 'dark' ? 'text-white' : 'text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-indigo-600'}`}>Quick Notes</h1>
               <button 
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className={`touch-target p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
+                className={`p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
                 title="Toggle Theme"
               >
                 {theme === 'light' ? <Moon className="w-4.5 h-4.5" /> : <Sun className="w-4.5 h-4.5" />}
@@ -2348,7 +2464,7 @@ export default function App() {
               <h1 className={`text-xl sm:text-2xl font-black tracking-tight ${theme === 'dark' ? 'text-white' : 'text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-indigo-600'}`}>My Profile</h1>
               <button 
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className={`touch-target p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
+                className={`p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
                 title="Toggle Theme"
               >
                 {theme === 'light' ? <Moon className="w-4.5 h-4.5" /> : <Sun className="w-4.5 h-4.5" />}
@@ -2364,7 +2480,7 @@ export default function App() {
               <h1 className={`text-xl sm:text-2xl font-black tracking-tight ${theme === 'dark' ? 'text-white' : 'text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-indigo-600'}`}>Settings</h1>
               <button 
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className={`touch-target p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
+                className={`p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
                 title="Toggle Theme"
               >
                 {theme === 'light' ? <Moon className="w-4.5 h-4.5" /> : <Sun className="w-4.5 h-4.5" />}
@@ -2392,8 +2508,8 @@ export default function App() {
           </div>
         ) : (
           <>
-             {/* Search input bar */}
-             <div className="w-full max-w-xl mx-auto flex items-center space-x-2 py-2 px-0.5 transition-colors duration-300">
+             {/* Sticky/Smooth Search input bar */}
+             <div className={`w-full max-w-xl mx-auto flex items-center space-x-2 sticky top-0 z-10 py-[2px] backdrop-blur-sm transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-950/95' : 'bg-[var(--color-warm-bg)]/95'}`}>
                 <div className="relative flex-1">
                   <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
                   <input
@@ -2401,12 +2517,12 @@ export default function App() {
                     placeholder="Search documents by title..."
                     value={searchQuery || ''}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className={`w-full pl-9 pr-8 py-1.5 bg-white border rounded-xl text-sm transition-all focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-400 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white focus:border-slate-700' : 'bg-white border-gray-200 text-gray-850 focus:border-gray-300 shadow-xs'}`}
+                    className="w-full pl-10 pr-10 py-2 bg-white border border-gray-200 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm transition-all placeholder-gray-400"
                   />
                   {searchQuery && (
                     <button
                       onClick={() => setSearchQuery('')}
-                      className="absolute right-2.5 top-2 p-0.5 text-gray-400 hover:text-gray-600 rounded-full"
+                      className="absolute right-3 top-2.5 p-0.5 text-gray-400 hover:text-gray-600 rounded-full"
                     >
                       <X className="h-4 w-4" />
                     </button>
@@ -2414,26 +2530,25 @@ export default function App() {
                 </div>
                 {documents.length > 0 && (
                   <div className="flex items-center space-x-1.5 flex-shrink-0">
-                    <div className={`relative flex items-center h-8 rounded-lg border transition-colors cursor-pointer px-2 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800 hover:border-slate-750' : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 shadow-xs'}`}>
-                      <ArrowDownUp className="w-3 h-3 opacity-60 mr-1 pointer-events-none" />
+                    <div className={`relative flex items-center group cursor-pointer px-1.5 py-1.5 rounded-full transition-colors ${theme === 'dark' ? 'text-slate-300 bg-slate-800 hover:bg-slate-700' : 'text-[var(--color-warm-text)] bg-[var(--color-warm-card)] shadow-sm hover:bg-[var(--color-warm-border)] border border-[var(--color-warm-border)]'}`}>
+                      <ArrowDownUp className="w-3.5 h-3.5 sm:w-4 sm:h-4 opacity-70 absolute left-2 pointer-events-none" />
                       <select 
                         value={sortOrder} 
                         onChange={e => setSortOrder(e.target.value as SortOrder)}
-                        className="bg-transparent text-[11px] font-medium appearance-none outline-none cursor-pointer pr-3.5 py-0"
+                        className="bg-transparent text-[10px] sm:text-xs font-semibold appearance-none outline-none cursor-pointer pl-6 pr-3 py-0.5"
                       >
                         <option value="newest" className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>Newest</option>
                         <option value="oldest" className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>Oldest</option>
                         <option value="alpha" className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>A-Z</option>
                       </select>
-                      <ChevronDown className="w-3 h-3 opacity-55 absolute right-1.5 pointer-events-none" />
                     </div>
                     <button 
                       onClick={() => setIsMultiSelect(true)} 
-                      className={`flex items-center h-8 px-2 rounded-lg text-[11px] font-medium border transition-all active:scale-95 ${theme === 'dark' ? 'text-blue-400 bg-slate-900 border-slate-800 hover:bg-slate-800' : 'text-blue-600 bg-blue-50 border-blue-100/70 hover:bg-blue-100 shadow-xs'}`}
+                      className={`flex items-center px-2 py-1.5 sm:px-3 sm:py-2 rounded-full transition-all ${theme === 'dark' ? 'text-blue-400 bg-slate-800 hover:bg-slate-700' : 'text-blue-600 bg-blue-50 border border-blue-100 hover:bg-blue-100 shadow-sm'}`}
                       title="Select multiple"
                     >
-                      <CheckSquare className="w-3 h-3" />
-                      <span className="ml-1 hidden sm:inline-block">Select</span>
+                      <CheckSquare className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                      <span className="text-[10px] sm:text-xs font-bold ml-1.5 hidden sm:inline-block">Select</span>
                     </button>
                   </div>
                 )}
@@ -2460,49 +2575,36 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="flex items-center space-x-1.5 overflow-x-auto pb-1.5 hide-scrollbar">
+                <div className="flex items-center space-x-1.5 overflow-x-auto pb-1.5 scrollbar-thin">
                   <button
                     onClick={() => setActiveFolderFilter('all')}
-                    className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all border ${activeFolderFilter === 'all' ? 'bg-blue-600 border-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white text-gray-650 hover:bg-gray-100 border-gray-200')}`}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${activeFolderFilter === 'all' ? 'bg-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-800 text-slate-300 hover:bg-slate-750' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-100')}`}
                   >
                     All ({documents.filter(d => !d.isTrash).length})
                   </button>
                   <button
                     onClick={() => setActiveFolderFilter('root')}
-                    className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all border ${activeFolderFilter === 'root' ? 'bg-blue-600 border-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white text-gray-650 hover:bg-gray-100 border-gray-200')}`}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${activeFolderFilter === 'root' ? 'bg-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-800 text-slate-300 hover:bg-slate-750' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-100')}`}
                   >
                     Uncategorized ({documents.filter(d => !d.isTrash && !d.folderId).length})
                   </button>
                   <button
                     onClick={() => setActiveFolderFilter('trash')}
-                    className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all border flex items-center ${activeFolderFilter === 'trash' ? 'bg-red-600 border-red-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-900 border-slate-800 text-red-400 hover:bg-slate-80 border-slate-800' : 'bg-red-50 border-red-200 text-red-750 hover:bg-red-100/70')}`}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all flex items-center ${activeFolderFilter === 'trash' ? 'bg-red-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-800 text-red-400 hover:bg-slate-750' : 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200')}`}
                   >
                     <Trash2 className="w-3.5 h-3.5 mr-1" />
                     Trash ({documents.filter(d => d.isTrash).length})
                   </button>
                   {folders.map(folder => {
                     const count = documents.filter(d => !d.isTrash && d.folderId === folder.id).length;
-                    const isActive = activeFolderFilter === folder.id;
                     return (
-                      <div 
-                        key={folder.id} 
-                        className={`flex items-center shrink-0 rounded-xl border transition-all text-xs font-semibold whitespace-nowrap overflow-hidden select-none ${
-                          isActive 
-                            ? 'bg-blue-600 border-blue-600 text-white shadow-xs' 
-                            : (theme === 'dark' 
-                                ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-850 hover:border-slate-700' 
-                                : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 hover:border-gray-300 shadow-xs')
-                        }`}
-                      >
+                      <div key={folder.id} className="flex items-center shrink-0">
                         <button
                           onClick={() => setActiveFolderFilter(folder.id)}
-                          className="px-3 py-1.5 flex items-center h-full focus:outline-none"
+                          className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all flex items-center ${activeFolderFilter === folder.id ? 'bg-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-800 text-slate-300 hover:bg-slate-750' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-100')}`}
                         >
-                          <FolderOpen className={`w-3.5 h-3.5 mr-1.5 ${isActive ? 'text-white' : 'text-gray-400'}`} />
-                          <span>{folder.name}</span>
-                          <span className={`ml-1.5 text-[10px] font-bold px-1.5 py-0.25 rounded-full ${isActive ? 'bg-white/20 text-white' : (theme === 'dark' ? 'bg-slate-800 text-slate-400' : 'bg-gray-100 text-gray-500')}`}>
-                            {count}
-                          </span>
+                          <FolderOpen className="w-3 h-3 mr-1 opacity-70" />
+                          {folder.name} ({count})
                         </button>
                         <button
                           onClick={async (e) => {
@@ -2517,16 +2619,10 @@ export default function App() {
                               }
                             }
                           }}
-                          className={`px-2 py-1.5 h-full border-l flex items-center justify-center transition-colors focus:outline-none ${
-                            isActive 
-                              ? 'border-blue-500/35 hover:bg-blue-700 text-blue-200 hover:text-white' 
-                              : (theme === 'dark' 
-                                  ? 'border-slate-850 hover:bg-slate-800 hover:text-red-400 text-slate-500' 
-                                  : 'border-gray-150 hover:bg-red-50 hover:text-red-600 text-gray-400')
-                          }`}
+                          className={`p-1 ml-0.5 rounded-lg hover:text-red-500 transition-colors ${theme === 'dark' ? 'text-slate-500 hover:bg-slate-850' : 'text-gray-400 hover:bg-gray-100'}`}
                           title="Delete folder"
                         >
-                          <X className="w-3 h-3" />
+                          <Trash2 className="w-3 h-3" />
                         </button>
                       </div>
                     );
@@ -2582,7 +2678,7 @@ export default function App() {
                    {folderId === 'root' && folders.length > 0 && (
                      <h2 className={`text-lg font-semibold ${theme === 'dark' ? 'text-slate-200' : 'text-[var(--color-warm-text)]'}`}>Uncategorized</h2>
                    )}
-                   <motion.div layout className={layout === 'grid' ? "grid gap-3 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" : "flex flex-col gap-3"}>
+                   <motion.div layout className={layout === 'grid' ? "grid gap-3 grid-cols-3 sm:grid-cols-4 lg:grid-cols-5" : "flex flex-col gap-3"}>
                      <AnimatePresence mode="popLayout">
                      {folderDocs.map(doc => {
                        const isSelected = selectedDocs.has(doc.id);
@@ -2626,7 +2722,7 @@ export default function App() {
                             
                             <div className={`rounded overflow-hidden flex-shrink-0 relative ${theme === 'dark' ? 'bg-slate-800 border border-slate-700' : 'bg-white border border-[var(--color-warm-border)]'} ${layout === 'grid' ? 'w-full aspect-[3/4]' : 'w-16 h-20'}`}>
                               {doc.pages[0] && (
-                                <img src={doc.pages[0].filteredImage} alt="" className="w-full h-full object-cover" loading="lazy" decoding="async" />
+                                <img src={doc.pages[0].filteredImage} alt="" className="w-full h-full object-cover" />
                               )}
                               {isMultiSelect && layout === 'grid' && (
                                 <div className="absolute top-1 left-1" onClick={(e) => toggleSelection(doc.id, e)}>
@@ -2652,7 +2748,7 @@ export default function App() {
                                       e.stopPropagation();
                                       setActiveMenuDocId(activeMenuDocId === doc.id ? null : doc.id);
                                     }}
-                                    className={`touch-target p-1.5 rounded-full transition-colors ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-500 hover:bg-gray-100'}`}
+                                    className={`p-1.5 rounded-full transition-colors ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-500 hover:bg-gray-100'}`}
                                   >
                                     <MoreVertical className="w-5 h-5" />
                                   </button>
@@ -2928,7 +3024,7 @@ export default function App() {
       {/* Hidden File Inputs */}
       <input 
          type="file" 
-         accept="image/*"
+         accept="image/*,application/pdf"
          multiple
          className="hidden" 
          ref={fileInputGalleryRef}
@@ -2936,7 +3032,7 @@ export default function App() {
       />
       <input 
          type="file" 
-         accept="image/*"
+         accept="image/*,application/pdf"
          capture="environment" 
          className="hidden" 
          ref={fileInputCameraRef}
@@ -2947,7 +3043,7 @@ export default function App() {
       {renderBatchProgressOverlay()}
 
       {/* Bottom Tab Bar Navigation Footer */}
-      <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-md border-t pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] px-6 safe-pl safe-pr flex items-center justify-between z-40 shadow-xl max-w-lg mx-auto sm:rounded-t-2xl transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-900/95 border-slate-800' : 'bg-[var(--color-warm-card)]/95 border-[var(--color-warm-border)]'}`}>
+      <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-md border-t py-2.5 px-6 flex items-center justify-between z-40 shadow-xl max-w-lg mx-auto sm:rounded-t-2xl transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-900/95 border-slate-800' : 'bg-[var(--color-warm-card)]/95 border-[var(--color-warm-border)]'}`}>
         {/* Home Tab */}
         <button 
           onClick={() => setCurrentTab('home')}
@@ -2988,7 +3084,7 @@ export default function App() {
               <div className={`absolute bottom-18 rounded-2xl shadow-2xl p-2.5 w-44 flex flex-col space-y-1 z-40 animate-in slide-in-from-bottom-5 duration-200 border ${theme === 'dark' ? 'bg-slate-800 border-slate-700' : 'bg-[var(--color-warm-card)] border-[var(--color-warm-border)]'}`}>
                 <button 
                   onClick={() => {
-                    setCameraMode("single"); setShowCustomCamera(true);
+                    fileInputCameraRef.current?.click();
                     setShowScanMenu(false);
                   }}
                   type="button"
