@@ -5,6 +5,7 @@ import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Capacitor } from '@capacitor/core';
 import { Camera as CapCamera } from '@capacitor/camera';
 import { Device } from '@capacitor/device';
+import { App as CapApp } from '@capacitor/app';
 
 interface Point {
   x: number;
@@ -541,6 +542,20 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
             >
               Request Permission / Retry
             </button>
+            {Capacitor.isNativePlatform() && (
+              <button 
+                onClick={async () => {
+                  try {
+                    await (CapApp as any).openAppSettings();
+                  } catch (e) {
+                    console.error("Open app settings failed", e);
+                  }
+                }}
+                className="w-full bg-slate-800 text-white py-3 rounded-xl font-bold active:scale-95 transition-transform border border-slate-700 hover:bg-slate-700"
+              >
+                Open Settings
+              </button>
+            )}
             <button 
               onClick={onPickGallery}
               className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold active:scale-95 transition-transform"

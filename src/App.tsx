@@ -6,6 +6,7 @@ import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { App as CapApp } from '@capacitor/app';
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
+import { Camera as CapCamera } from '@capacitor/camera';
 
 export const triggerHapticLight = async (type?: 'scan' | 'export' | 'delete') => {
   if (type && localStorage.getItem(`docscanner_haptic_${type}`) === 'false') return;
@@ -201,6 +202,87 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('docscanner_theme', theme);
   }, [theme]);
+
+  const [permissionModal, setPermissionModal] = useState<{
+    type: 'camera' | 'photos';
+    onGrant: () => Promise<void>;
+    onCancel: () => void;
+  } | null>(null);
+
+  // Auto request camera on first app launch
+  useEffect(() => {
+    const autoRequestCameraOnLaunch = async () => {
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const hasRequestedOnLaunch = localStorage.getItem('docscanner_has_requested_camera_launch');
+          if (!hasRequestedOnLaunch) {
+            const status = await CapCamera.checkPermissions();
+            if (status.camera !== 'granted') {
+              await CapCamera.requestPermissions({ permissions: ['camera'] });
+            }
+            localStorage.setItem('docscanner_has_requested_camera_launch', 'true');
+          }
+        } catch (e) {
+          console.warn("Failed to request camera permission on launch:", e);
+        }
+      }
+    };
+    autoRequestCameraOnLaunch();
+  }, []);
+
+  // Unified Gallery helper that handles permission request & friendly denied dialog
+  const triggerGallery = async (ref: React.RefObject<HTMLInputElement | null>) => {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const status = await CapCamera.checkPermissions();
+        console.log("Native check gallery permissions:", status);
+        if (status.photos === 'granted') {
+          ref.current?.click();
+        } else {
+          if (status.photos === 'prompt' || status.photos === 'prompt-with-rationale' || !localStorage.getItem('docscanner_photos_denied_before')) {
+            const reqStatus = await CapCamera.requestPermissions({ permissions: ['photos'] });
+            console.log("Native request gallery permissions result:", reqStatus);
+            if (reqStatus.photos === 'granted') {
+              ref.current?.click();
+            } else {
+              localStorage.setItem('docscanner_photos_denied_before', 'true');
+              setPermissionModal({
+                type: 'photos',
+                onGrant: async () => {
+                  setPermissionModal(null);
+                  await triggerGallery(ref);
+                },
+                onCancel: () => setPermissionModal(null)
+              });
+            }
+          } else {
+            setPermissionModal({
+              type: 'photos',
+              onGrant: async () => {
+                setPermissionModal(null);
+                const reqStatus = await CapCamera.requestPermissions({ permissions: ['photos'] });
+                if (reqStatus.photos === 'granted') {
+                  ref.current?.click();
+                } else {
+                  try {
+                    await (CapApp as any).openAppSettings();
+                  } catch (e) {
+                    console.error("Open app settings failed", e);
+                  }
+                }
+              },
+              onCancel: () => setPermissionModal(null)
+            });
+          }
+        }
+      } catch (err) {
+        console.warn("Natively checking/requesting gallery permission failed, trying fallback:", err);
+        ref.current?.click();
+      }
+    } else {
+      ref.current?.click();
+    }
+  };
 
   // Profile details state with local persistence
   const [profileName, setProfileName] = useState<string>(() => {
@@ -518,6 +600,58 @@ export default function App() {
   const renderCustomDialogs = () => {
     return (
       <>
+        {permissionModal && (
+          <div className="fixed inset-0 bg-black/80 z-[300] flex items-center justify-center p-6 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className={`w-full max-w-sm rounded-2xl p-6 shadow-2xl border text-center animate-in zoom-in-95 duration-200 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-gray-100 text-gray-900'}`}>
+              <div className="w-16 h-16 mx-auto bg-indigo-500/10 rounded-full flex items-center justify-center mb-4">
+                {permissionModal.type === 'camera' ? (
+                  <Camera className="w-8 h-8 text-indigo-500" />
+                ) : (
+                  <ImageIcon className="w-8 h-8 text-indigo-500" />
+                )}
+              </div>
+              <h3 className="font-bold text-lg mb-2">
+                {permissionModal.type === 'camera' ? 'Camera Permission Required' : 'Gallery Permission Required'}
+              </h3>
+              <p className="text-sm text-gray-400 mb-6 leading-relaxed">
+                {permissionModal.type === 'camera' 
+                  ? 'To scan documents using your device camera, please grant camera access.' 
+                  : 'To select images and PDFs from your device storage, please grant gallery access.'}
+              </p>
+              <div className="flex flex-col space-y-3">
+                <button
+                  onClick={async () => {
+                    await permissionModal.onGrant();
+                  }}
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-xl font-bold transition-all active:scale-95"
+                >
+                  Grant Permission
+                </button>
+                <button
+                  onClick={async () => {
+                    try {
+                      await (CapApp as any).openAppSettings();
+                    } catch (err) {
+                      console.error("Could not open settings:", err);
+                    }
+                  }}
+                  className={`w-full py-3 rounded-xl font-bold transition-all active:scale-95 border ${theme === 'dark' ? 'bg-slate-800 text-white border-slate-700 hover:bg-slate-700' : 'bg-gray-100 text-gray-800 border-gray-200 hover:bg-gray-200'}`}
+                >
+                  Open Settings
+                </button>
+                <button
+                  onClick={() => {
+                    permissionModal.onCancel();
+                  }}
+                  className="w-full text-gray-500 hover:text-slate-400 text-sm py-1 font-semibold animate-pulse"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {confirmState && (
           <div className="fixed inset-0 bg-black/60 z-[120] flex items-center justify-center p-4 backdrop-blur-xs">
             <div className={`w-full max-w-sm rounded-2xl p-6 shadow-2xl ${theme === 'dark' ? 'bg-slate-900 text-white border border-slate-800' : 'bg-white text-gray-900'}`}>
@@ -2159,9 +2293,9 @@ export default function App() {
         onClose={() => setShowCustomCamera(false)}
         onPickGallery={() => {
           if (cameraMode === "single") {
-            fileInputGalleryRef.current?.click();
+            triggerGallery(fileInputGalleryRef);
           } else {
-            fileInputGalleryRef2.current?.click();
+            triggerGallery(fileInputGalleryRef2);
           }
         }}
         onFallback={() => {
@@ -2404,7 +2538,7 @@ export default function App() {
                 <span className="font-bold text-sm">Scan Page</span>
               </button>
               <button 
-                onClick={() => fileInputGalleryRef2.current?.click()}
+                onClick={() => triggerGallery(fileInputGalleryRef2)}
                 className={`flex-1 flex items-center justify-center space-x-2 px-4 py-3 rounded-xl shadow-md transition-all active:scale-95 ${theme === "dark" ? "bg-slate-800 text-white hover:bg-slate-700 border border-slate-700" : "bg-white text-gray-700 hover:bg-gray-50 border border-gray-200"}`}
               >
                 <ImageIcon className="w-5 h-5" />
@@ -3959,7 +4093,7 @@ export default function App() {
                 </button>
                 <button 
                   onClick={() => {
-                    fileInputGalleryRef.current?.click();
+                    triggerGallery(fileInputGalleryRef);
                     setShowScanMenu(false);
                   }}
                   type="button"
