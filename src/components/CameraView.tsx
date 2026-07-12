@@ -65,6 +65,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
   const [capturedImages, setCapturedImages] = useState<File[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [isAutoCapturePaused, setIsAutoCapturePaused] = useState(false);
+  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -329,6 +330,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
   const performCapture = async (corners?: Point[]) => {
     if (isCapturingRef.current) return;
     isCapturingRef.current = true;
+    setIsProcessingPhoto(true);
     
     playShutterSound();
 
@@ -370,6 +372,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
         // Batch mode: add to stack
         setCapturedImages(prev => [...prev, file]);
         setIsAutoCapturePaused(true);
+        setIsProcessingPhoto(false);
         setTimeout(() => {
           isCapturingRef.current = false;
         }, 850);
@@ -377,12 +380,23 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
     };
 
     // Use high-performance canvas drawing instead of ImageCapture to prevent camera sensor freezing/hanging
+    const maxDim = 2560; // Max 2560px on longest edge to prevent 12MP toBlob hanging on mobile
+    let targetWidth = video.videoWidth;
+    let targetHeight = video.videoHeight;
+    
+    if (Math.max(targetWidth, targetHeight) > maxDim) {
+      const scale = maxDim / Math.max(targetWidth, targetHeight);
+      targetWidth = Math.round(targetWidth * scale);
+      targetHeight = Math.round(targetHeight * scale);
+    }
+    
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
       isCapturingRef.current = false;
+      setIsProcessingPhoto(false);
       return;
     }
     
@@ -394,7 +408,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
       const sy = (video.videoHeight - sh) / 2;
       ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
     } else {
-      ctx.drawImage(video, 0, 0);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     }
     
     canvas.toBlob((blob) => {
@@ -402,8 +416,9 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
         handleCapturedBlob(blob);
       } else {
         isCapturingRef.current = false;
+        setIsProcessingPhoto(false);
       }
-    }, 'image/jpeg', 0.98);
+    }, 'image/jpeg', 0.92);
   };
 
   const handleFinishBatch = () => {
@@ -426,9 +441,21 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
           <p className="text-gray-400 text-sm mb-6 leading-relaxed">
             {cameraError}
             <br /><br />
-            If you are using this as an Android APK, please ensure you have granted **Camera Permissions** in your device settings.
+            If you are using this as an Android APK, please ensure you have granted <strong>Camera Permissions</strong>.
           </p>
-          <div className="flex flex-col w-full gap-3">
+          <div className="flex flex-col w-full gap-3 max-w-xs">
+            <button 
+              onClick={() => {
+                if (typeof window !== 'undefined' && (window as any).Android && (window as any).Android.requestCameraPermission) {
+                  (window as any).Android.requestCameraPermission();
+                } else {
+                  window.location.reload();
+                }
+              }}
+              className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold active:scale-95 transition-transform"
+            >
+              Request Permission / Retry
+            </button>
             <button 
               onClick={onPickGallery}
               className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold active:scale-95 transition-transform"
@@ -586,10 +613,18 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
             </div>
           </div>
         )}
+
+        {/* Optimizing Overlay */}
+        {isProcessingPhoto && (
+          <div className="absolute inset-0 bg-black/90 backdrop-blur-sm z-50 flex flex-col items-center justify-center pointer-events-none animate-in fade-in duration-200">
+             <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4 shadow-lg shadow-blue-500/20"></div>
+             <p className="text-white font-bold text-sm tracking-wide">Optimizing...</p>
+          </div>
+        )}
       </div>
       
       {/* Sleek Bottom Control Bar - Non-overlapping Flow-based Layout */}
-      <div className="bg-neutral-950 pb-safe z-30 flex flex-col select-none">
+      <div className="bg-neutral-950 safe-pb z-30 flex flex-col select-none">
         
         {/* Real-time Zoom Slider perfectly integrated as a single clean thin line */}
         <div className="flex items-center justify-center py-2.5 px-8 bg-neutral-950">

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Camera, Image as ImageIcon, Plus, FileText, ChevronRight, ChevronDown, Download, Trash2, ArrowLeft, Share2, CheckSquare, Square, X, ArrowDownUp, LayoutGrid, List as ListIcon, FolderInput, FolderPlus, Combine, Pencil, Check, Search, ArrowUp, ArrowDown, GripVertical, Home, StickyNote, User, Settings, Sun, Moon, Crop, MoreVertical, Lock, Unlock, FileArchive, FolderOpen, Mail, Undo, ZoomIn, ZoomOut, Info, Layers, Sparkles, Eye } from 'lucide-react';
+import { Camera, Image as ImageIcon, Plus, FileText, ChevronRight, ChevronDown, Download, Upload, Trash2, ArrowLeft, Share2, CheckSquare, Square, X, ArrowDownUp, LayoutGrid, List as ListIcon, FolderInput, FolderPlus, Combine, Pencil, Check, Search, ArrowUp, ArrowDown, GripVertical, Home, StickyNote, User, Settings, Sun, Moon, Crop, MoreVertical, Lock, Unlock, FileArchive, FolderOpen, Mail, Undo, ZoomIn, ZoomOut, Info, Layers, Sparkles, Eye } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -280,6 +280,7 @@ export default function App() {
   const fileInputCameraRef = useRef<HTMLInputElement>(null);
   const fileInputGalleryRef2 = useRef<HTMLInputElement>(null);
   const fileInputCameraRef2 = useRef<HTMLInputElement>(null);
+  const restoreInputRef = useRef<HTMLInputElement>(null);
 
   const [isProcessingBatch, setIsProcessingBatch] = useState(false);
   const [isProcessingStep, setIsProcessingStep] = useState(false);
@@ -477,7 +478,16 @@ export default function App() {
       }
 
       // 8. If nothing is open and we are on home view, exit the app
-      CapApp.exitApp();
+      if (s.confirmState) return;
+      
+      setConfirmState({
+        message: "Are you sure you want to exit?",
+        resolve: (confirmed: boolean) => {
+          if (confirmed) {
+            CapApp.exitApp();
+          }
+        }
+      });
     };
 
     const backListener = CapApp.addListener('backButton', handleBackButton);
@@ -1040,7 +1050,30 @@ export default function App() {
     if (!doc) return;
 
     try {
-      const updatedDoc = { ...doc, isTrash: false };
+      if (doc.originalDocId) {
+        const originalDoc = documents.find(d => d.id === doc.originalDocId);
+        if (originalDoc) {
+          // Merge back into original document
+          const updatedPages = [...originalDoc.pages];
+          const pageIndex = typeof doc.originalPageIndex === 'number' ? doc.originalPageIndex : updatedPages.length;
+          
+          // Clamp index to array bounds in case pages were deleted
+          const safeIndex = Math.min(Math.max(0, pageIndex), updatedPages.length);
+          updatedPages.splice(safeIndex, 0, doc.pages[0]);
+          
+          const updatedOriginalDoc = { ...originalDoc, pages: updatedPages };
+          
+          await saveDocument(updatedOriginalDoc);
+          await deleteDocument(id); // Remove the temporary trashed doc
+          
+          const freshDocs = await getDocuments();
+          setDocuments(freshDocs);
+          setCurrentDoc(updatedOriginalDoc);
+          return;
+        }
+      }
+
+      const updatedDoc = { ...doc, isTrash: false, originalDocId: undefined, originalPageIndex: undefined };
       await saveDocument(updatedDoc);
       
       const freshDocs = await getDocuments();
@@ -1082,22 +1115,35 @@ export default function App() {
 
   const handleDeletePage = async (doc: Document, pageIndex: number) => {
     if (doc.pages.length === 1) {
-      const confirmDelete = await showCustomConfirm("This document only has one page. Deleting this page will delete the entire document. Do you want to proceed?");
+      const confirmDelete = await showCustomConfirm("This document only has one page. Deleting this page will move the entire document to the Trash. Do you want to proceed?");
       if (confirmDelete) {
         await handleDeleteDoc(doc.id);
       }
       return;
     }
 
-    const confirmDeletePage = await showCustomConfirm(`Are you sure you want to delete Page ${pageIndex + 1}?`);
+    const confirmDeletePage = await showCustomConfirm(`Are you sure you want to move Page ${pageIndex + 1} to the Trash?`);
     if (confirmDeletePage) {
       triggerHapticMedium();
+      const pageToDelete = doc.pages[pageIndex];
       const updatedPages = [...doc.pages];
       updatedPages.splice(pageIndex, 1);
       const updatedDoc = { ...doc, pages: updatedPages };
+      
+      const trashedDoc: Document = {
+        id: crypto.randomUUID(),
+        title: `${doc.title} - Page ${pageIndex + 1}`,
+        createdAt: Date.now(),
+        pages: [pageToDelete],
+        isTrash: true,
+        originalDocId: doc.id,
+        originalPageIndex: pageIndex
+      };
+
       try {
+        await saveDocument(trashedDoc);
         await saveDocument(updatedDoc);
-        setDocuments(prev => prev.map(d => d.id === updatedDoc.id ? updatedDoc : d));
+        setDocuments(prev => [trashedDoc, ...prev.map(d => d.id === updatedDoc.id ? updatedDoc : d)]);
         if (currentDoc?.id === updatedDoc.id) {
           setCurrentDoc(updatedDoc);
         }
@@ -1438,7 +1484,25 @@ export default function App() {
     const docsToProcess = Array.from(selectedDocs).map(id => documents.find(d => d.id === id)).filter(Boolean) as Document[];
     if (docsToProcess.length === 0) return;
 
-    await Promise.all(docsToProcess.map(d => saveDocument({ ...d, isTrash: false })));
+    for (const doc of docsToProcess) {
+      if (doc.originalDocId) {
+        // We must fetch fresh documents inside the loop in case multiple pages belong to the same original document
+        const currentDocs = await getDocuments();
+        const originalDoc = currentDocs.find(d => d.id === doc.originalDocId);
+        if (originalDoc) {
+          const updatedPages = [...originalDoc.pages];
+          const pageIndex = typeof doc.originalPageIndex === 'number' ? doc.originalPageIndex : updatedPages.length;
+          const safeIndex = Math.min(Math.max(0, pageIndex), updatedPages.length);
+          updatedPages.splice(safeIndex, 0, doc.pages[0]);
+          
+          await saveDocument({ ...originalDoc, pages: updatedPages });
+          await deleteDocument(doc.id);
+          continue;
+        }
+      }
+      
+      await saveDocument({ ...doc, isTrash: false, originalDocId: undefined, originalPageIndex: undefined });
+    }
     
     const freshDocs = await getDocuments();
     setDocuments(freshDocs);
@@ -1578,6 +1642,8 @@ export default function App() {
        .map(async d => {
           d.folderId = folderId;
           d.isTrash = false; // Recover if in trash
+          d.originalDocId = undefined;
+          d.originalPageIndex = undefined;
           await saveDocument(d);
        });
        
@@ -1615,274 +1681,392 @@ export default function App() {
     if (!showExportModalFor) return null;
     const doc = documents.find(d => d.id === showExportModalFor);
     if (!doc) return null;
+
+    const formats = [
+      { id: 'pdf', label: 'PDF Document', icon: FileText, desc: 'Best for multi-page scanning & sharing' },
+      { id: 'images', label: 'Images (JPG)', icon: ImageIcon, desc: 'Best for photo gallery & individual pages' },
+      { id: 'zip', label: 'ZIP Archive', icon: FileArchive, desc: 'Package all pages in a single file' }
+    ] as const;
+
     return (
-      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-        <div className={`w-full max-w-md rounded-2xl p-6 max-h-[85vh] overflow-y-auto ${theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-gray-900'} shadow-2xl border ${theme === 'dark' ? 'border-slate-800' : 'border-gray-100'}`}>
-          <h3 className="font-bold text-xl mb-4">Export Options</h3>
-          <div className="space-y-5">
-            
-            <div>
-              <label className="block text-sm font-medium mb-2">Format</label>
-              <div className="flex bg-gray-100 rounded-lg p-1 dark:bg-slate-800">
-                <button 
-                  onClick={() => setExportFormat('pdf')} 
-                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'pdf' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
-                >
-                  PDF
-                </button>
-                <button 
-                  onClick={() => setExportFormat('images')} 
-                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'images' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
-                >
-                  Images
-                </button>
-                <button 
-                  onClick={() => setExportFormat('zip')} 
-                  className={`flex-1 text-sm py-2 rounded-md font-medium transition-all ${exportFormat === 'zip' ? (theme === 'dark' ? 'bg-slate-700 shadow text-white' : 'bg-white shadow text-black') : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
-                >
-                  ZIP
-                </button>
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto animate-fade-in">
+        <div 
+          className={`w-full max-w-lg rounded-3xl p-6 md:p-8 max-h-[90vh] overflow-y-auto ${
+            theme === 'dark' ? 'bg-slate-900 text-white border border-slate-800' : 'bg-white text-gray-900 border border-gray-100'
+          } shadow-2xl relative flex flex-col space-y-6`}
+        >
+          {/* Close button top right */}
+          <button 
+            onClick={() => { setShowExportModalFor(null); setExportPassword(''); setExportQuality(1); }}
+            className={`absolute top-5 right-5 p-2 rounded-full transition-colors ${
+              theme === 'dark' ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-gray-400 hover:text-gray-700 hover:bg-gray-100'
+            }`}
+            title="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
+
+          {/* Header */}
+          <div className="space-y-1">
+            <div className="flex items-center space-x-2.5">
+              <div className="p-2 rounded-xl bg-blue-500/10 text-blue-500">
+                <Share2 className="w-6 h-6" />
+              </div>
+              <h3 className="font-extrabold text-2xl tracking-tight">Export & Share</h3>
+            </div>
+            <p className={`text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-gray-500'}`}>
+              Configure options to download, email, or share "{doc.title}"
+            </p>
+          </div>
+
+          {/* Body content */}
+          <div className="space-y-5 flex-1">
+            {/* Format Selection Cards */}
+            <div className="space-y-2.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+                Choose Format
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {formats.map((fmt) => {
+                  const IconComp = fmt.icon;
+                  const isSelected = exportFormat === fmt.id;
+                  return (
+                    <button
+                      key={fmt.id}
+                      onClick={() => setExportFormat(fmt.id)}
+                      type="button"
+                      className={`flex sm:flex-col items-start p-3.5 rounded-2xl border text-left transition-all relative ${
+                        isSelected 
+                          ? (theme === 'dark' ? 'border-blue-500 bg-blue-500/10 ring-2 ring-blue-500/20' : 'border-blue-500 bg-blue-50/50 ring-2 ring-blue-500/10')
+                          : (theme === 'dark' ? 'border-slate-800 bg-slate-950/40 hover:bg-slate-800/50 text-slate-300' : 'border-gray-250 bg-gray-50/50 hover:bg-gray-100/50 text-gray-700')
+                      }`}
+                    >
+                      <div className={`p-2 rounded-xl mr-3 sm:mr-0 sm:mb-2.5 ${isSelected ? 'bg-blue-500 text-white' : (theme === 'dark' ? 'bg-slate-800 text-slate-400' : 'bg-gray-250 text-gray-500')}`}>
+                        <IconComp className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold">{fmt.label}</p>
+                        <p className={`text-[10px] leading-tight mt-0.5 ${theme === 'dark' ? 'text-slate-400' : 'text-gray-400'}`}>
+                          {fmt.desc}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            {exportFormat === 'pdf' && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2">Size / Quality</label>
-                  <select 
-                    value={exportQuality} 
-                    onChange={(e) => setExportQuality(Number(e.target.value))}
-                    className={`w-full p-2.5 rounded-xl border text-sm focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-gray-50 border-gray-200'}`}
-                  >
-                    <option value={1}>Original Quality (~Max Size)</option>
-                    <option value={0.75}>High Quality (~75% Size)</option>
-                    <option value={0.5}>Medium Quality (~50% Size)</option>
-                    <option value={0.3}>Low Quality (Smallest Size)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-2">Password Protection <span className="text-xs text-gray-500 font-normal">(Optional)</span></label>
-                  <input 
-                    type="password" 
-                    placeholder="Leave blank for no password" 
-                    value={exportPassword}
-                    onChange={(e) => setExportPassword(e.target.value)}
-                    className={`w-full px-4 py-2.5 rounded-xl border text-sm focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 placeholder-slate-500' : 'bg-gray-50 border-gray-200'}`}
-                  />
-                </div>
-              </>
-            )}
-
-            {/* Watermark Section */}
-            <div className="border-t pt-4 border-gray-100 dark:border-slate-800">
-              <div className="flex items-center justify-between mb-3">
-                <label className="text-sm font-semibold flex items-center">
-                  <span className="mr-1.5 text-base">🛡️</span> Watermark Document
-                </label>
-                <label className="relative inline-flex items-center cursor-pointer select-none">
-                  <input 
-                    type="checkbox" 
-                    checked={watermarkEnabled} 
-                    onChange={(e) => setWatermarkEnabled(e.target.checked)} 
-                    className="sr-only peer"
-                  />
-                  <div className={`w-9 h-5 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:border after:rounded-full after:h-4 after:w-4 after:transition-all ${theme === 'dark' ? 'bg-slate-700 border-slate-600 after:bg-slate-300 after:border-slate-500 peer-checked:bg-blue-500' : 'bg-gray-200 after:bg-white after:border-gray-300 peer-checked:bg-blue-600'}`}></div>
-                </label>
-              </div>
-
-              {watermarkEnabled && (
-                <div className={`space-y-3 p-3.5 rounded-xl border text-xs ${theme === 'dark' ? 'bg-slate-800/40 border-slate-800/80' : 'bg-gray-50 border-gray-100'}`}>
-                  {/* Miniature Preview Area */}
-                    <div className={`mb-4`}>
-                      <label className="block font-semibold mb-2 text-[10px] opacity-70 uppercase tracking-wider">Live Preview</label>
-                      <div className={`relative h-40 w-28 mx-auto rounded-sm shadow-md overflow-hidden flex items-center justify-center border transition-colors ${theme === 'dark' ? 'bg-slate-900 border-slate-700' : 'bg-white border-gray-200'}`}>
-                        <div className={`absolute inset-0 flex items-center justify-center pointer-events-none opacity-5 font-bold text-[8px] uppercase tracking-widest ${theme === 'dark' ? 'text-white' : 'text-black'}`}>
-                          Document Page
-                        </div>
-                        
-                        {watermarkStyle === 'grid' ? (
-                          <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 gap-1 p-2 pointer-events-none">
-                            {[...Array(9)].map((_, i) => (
-                              <div key={i} className="flex items-center justify-center">
-                                <span 
-                                  style={{ 
-                                    color: watermarkColor, 
-                                    opacity: watermarkOpacity,
-                                    fontSize: `${watermarkSize * 0.15}px`,
-                                    transform: `rotate(${watermarkRotation}deg)`,
-                                  }}
-                                  className="font-bold select-none break-all text-center leading-none"
-                                >
-                                  {watermarkText || 'SAMPLE'}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <div 
-                            className={`absolute inset-0 flex pointer-events-none ${
-                              watermarkPosition === 'center' ? 'items-center justify-center' :
-                              watermarkPosition === 'top-left' ? 'items-start justify-start' :
-                              watermarkPosition === 'top-right' ? 'items-start justify-end' :
-                              watermarkPosition === 'bottom-left' ? 'items-end justify-start' :
-                              'items-end justify-end' // bottom-right
-                            }`}
-                            style={{ padding: `${watermarkMargin * 0.1}px` }}
-                          >
-                            <span 
-                              style={{ 
-                                color: watermarkColor, 
-                                opacity: watermarkOpacity,
-                                fontSize: `${watermarkSize * 0.3}px`,
-                                transform: `rotate(${watermarkRotation}deg)`,
-                                textAlign: watermarkPosition.includes('left') ? 'left' : (watermarkPosition.includes('right') ? 'right' : 'center')
-                              }}
-                              className="font-bold select-none break-all leading-tight"
-                            >
-                              {watermarkText || 'SAMPLE'}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                  <div>
-                    <label className="block font-semibold mb-1">Watermark Text</label>
-                    <input 
-                      type="text" 
-                      placeholder="e.g. CONFIDENTIAL, DRAFT" 
-                      value={watermarkText}
-                      onChange={(e) => setWatermarkText(e.target.value)}
-                      className={`w-full px-3 py-2 rounded-lg border text-xs focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 placeholder-slate-500 text-white' : 'bg-white border-gray-200'}`}
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
+            {/* Config options based on format */}
+            <div className="space-y-4">
+              {exportFormat === 'pdf' && (
+                <div className={`p-4 rounded-2xl border space-y-4 ${theme === 'dark' ? 'bg-slate-950/40 border-slate-800' : 'bg-gray-50/50 border-gray-150'}`}>
+                  {/* PDF quality & options */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block font-semibold mb-1">Style</label>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">Size / Quality</label>
                       <select 
-                        value={watermarkStyle}
-                        onChange={(e) => setWatermarkStyle(e.target.value as any)}
-                        className={`w-full p-2 rounded-lg border text-xs outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-gray-200'}`}
+                        value={exportQuality} 
+                        onChange={(e) => setExportQuality(Number(e.target.value))}
+                        className={`w-full p-2.5 rounded-xl border text-sm font-semibold focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-gray-200'}`}
                       >
-                        <option value="single">Single Text</option>
-                        <option value="grid">3x3 Grid Repeat</option>
+                        <option value={1}>Original Quality (~Max Size)</option>
+                        <option value={0.75}>High Quality (75%)</option>
+                        <option value={0.5}>Medium Quality (50%)</option>
+                        <option value={0.3}>Low Quality (Smallest)</option>
                       </select>
                     </div>
 
                     <div>
-                      <label className="block font-semibold mb-1">Position</label>
-                      <select 
-                        disabled={watermarkStyle === 'grid'}
-                        value={watermarkPosition}
-                        onChange={(e) => setWatermarkPosition(e.target.value as any)}
-                        className={`w-full p-2 rounded-lg border text-xs outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white disabled:opacity-40' : 'bg-white border-gray-200 disabled:opacity-40'}`}
-                      >
-                        <option value="center">Center</option>
-                        <option value="top-left">Top Left</option>
-                        <option value="top-right">Top Right</option>
-                        <option value="bottom-left">Bottom Left</option>
-                        <option value="bottom-right">Bottom Right</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3 pt-1">
-                    <div>
-                      <label className="block font-semibold mb-1">Size ({watermarkSize}px)</label>
-                      <input 
-                        type="range" 
-                        min={12} 
-                        max={80} 
-                        value={watermarkSize}
-                        onChange={(e) => setWatermarkSize(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block font-semibold mb-1">Opacity ({Math.round(watermarkOpacity * 100)}%)</label>
-                      <input 
-                        type="range" 
-                        min={0.05} 
-                        max={0.9} 
-                        step={0.05}
-                        value={watermarkOpacity}
-                        onChange={(e) => setWatermarkOpacity(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3 pt-1">
-                    <div>
-                      <label className="block font-semibold mb-1">Rotation ({watermarkRotation}°)</label>
-                      <input 
-                        type="range" 
-                        min={0} 
-                        max={360} 
-                        value={watermarkRotation}
-                        onChange={(e) => setWatermarkRotation(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block font-semibold mb-1">Margin ({watermarkMargin}px)</label>
-                      <input 
-                        type="range" 
-                        min={0} 
-                        max={100} 
-                        value={watermarkMargin}
-                        onChange={(e) => setWatermarkMargin(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block font-semibold mb-1">Color</label>
-                    <div className="flex items-center space-x-2 mt-1">
-                      <input 
-                        type="color" 
-                        value={watermarkColor}
-                        onChange={(e) => setWatermarkColor(e.target.value)}
-                        className="w-7 h-7 rounded cursor-pointer border border-gray-200 dark:border-slate-700 p-0"
-                      />
-                      <div className="flex flex-wrap gap-1">
-                        {['#CCCCCC', '#FF3B30', '#007AFF', '#34C759', '#FF9500'].map(c => (
-                          <button 
-                            key={c}
-                            onClick={() => setWatermarkColor(c)}
-                            className="w-4 h-4 rounded-full border border-gray-300 dark:border-slate-600 shadow-sm"
-                            style={{ backgroundColor: c }}
-                          />
-                        ))}
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">Password Protection <span className="text-[10px] text-gray-500 font-normal capitalize">(Optional)</span></label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-3 text-slate-400">
+                          <Lock className="w-4 h-4" />
+                        </span>
+                        <input 
+                          type="password" 
+                          placeholder="No password set" 
+                          value={exportPassword}
+                          onChange={(e) => setExportPassword(e.target.value)}
+                          className={`w-full pl-9 pr-4 py-2.5 rounded-xl border text-sm font-semibold focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-900 border-slate-800 placeholder-slate-600 text-white' : 'bg-white border-gray-200'}`}
+                        />
                       </div>
                     </div>
+                  </div>
+
+                  {/* Draw border toggle */}
+                  <div className="flex items-center justify-between pt-1">
+                    <div>
+                      <p className="text-sm font-bold">Draw borders on PDF pages</p>
+                      <p className={`text-[10px] ${theme === 'dark' ? 'text-slate-400' : 'text-gray-400'}`}>Adds a clean physical boundary to each page</p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer select-none">
+                      <input 
+                        type="checkbox" 
+                        checked={addPdfBorder} 
+                        onChange={(e) => setAddPdfBorder(e.target.checked)} 
+                        className="sr-only peer"
+                      />
+                      <div className={`w-9 h-5 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:border after:rounded-full after:h-4 after:w-4 after:transition-all ${theme === 'dark' ? 'bg-slate-800 border-slate-700 after:bg-slate-300 after:border-slate-500 peer-checked:bg-blue-500' : 'bg-gray-200 after:bg-white after:border-gray-300 peer-checked:bg-blue-600'}`}></div>
+                    </label>
                   </div>
                 </div>
               )}
+
+              {/* Watermark Section */}
+              <div className={`p-4 rounded-2xl border space-y-4 ${theme === 'dark' ? 'bg-slate-950/40 border-slate-800' : 'bg-gray-50/50 border-gray-150'}`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-base">🛡️</span>
+                    <div>
+                      <p className="text-sm font-bold">Secure with Watermark</p>
+                      <p className={`text-[10px] ${theme === 'dark' ? 'text-slate-400' : 'text-gray-400'}`}>Embed text overlays to protect your documents</p>
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer select-none">
+                    <input 
+                      type="checkbox" 
+                      checked={watermarkEnabled} 
+                      onChange={(e) => setWatermarkEnabled(e.target.checked)} 
+                      className="sr-only peer"
+                    />
+                    <div className={`w-9 h-5 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:border after:rounded-full after:h-4 after:w-4 after:transition-all ${theme === 'dark' ? 'bg-slate-800 border-slate-700 after:bg-slate-300 after:border-slate-500 peer-checked:bg-blue-500' : 'bg-gray-200 after:bg-white after:border-gray-300 peer-checked:bg-blue-600'}`}></div>
+                  </label>
+                </div>
+
+                {watermarkEnabled && (
+                  <div className="space-y-4 pt-2 border-t border-dashed border-gray-200 dark:border-slate-800">
+                    {/* Live Preview & text input */}
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                      {/* Live Preview left/top column */}
+                      <div className="md:col-span-5 flex flex-col justify-center items-center">
+                        <span className="block font-bold mb-1.5 text-[10px] uppercase tracking-wider text-slate-400 text-center w-full">Live Preview</span>
+                        <div className={`relative h-44 w-32 rounded-xl shadow-lg overflow-hidden flex items-center justify-center border transition-colors ${theme === 'dark' ? 'bg-slate-900 border-slate-700' : 'bg-white border-gray-200'}`}>
+                          {/* Inner page decoration */}
+                          <div className={`absolute inset-0 flex flex-col justify-between p-2.5 pointer-events-none opacity-5`}>
+                            <div className="h-1 bg-current w-1/2 rounded" />
+                            <div className="space-y-1.5 py-4 w-full">
+                              <div className="h-1 bg-current w-full rounded" />
+                              <div className="h-1 bg-current w-5/6 rounded" />
+                              <div className="h-1 bg-current w-4/5 rounded" />
+                            </div>
+                            <div className="h-1 bg-current w-1/3 rounded self-end" />
+                          </div>
+                          
+                          {watermarkStyle === 'grid' ? (
+                            <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 gap-1 p-2 pointer-events-none">
+                              {[...Array(9)].map((_, i) => (
+                                <div key={i} className="flex items-center justify-center">
+                                  <span 
+                                    style={{ 
+                                      color: watermarkColor, 
+                                      opacity: watermarkOpacity,
+                                      fontSize: `${watermarkSize * 0.15}px`,
+                                      transform: `rotate(${watermarkRotation}deg)`,
+                                    }}
+                                    className="font-bold select-none break-all text-center leading-none"
+                                  >
+                                    {watermarkText || 'SAMPLE'}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div 
+                              className={`absolute inset-0 flex pointer-events-none ${
+                                watermarkPosition === 'center' ? 'items-center justify-center' :
+                                watermarkPosition === 'top-left' ? 'items-start justify-start' :
+                                watermarkPosition === 'top-right' ? 'items-start justify-end' :
+                                watermarkPosition === 'bottom-left' ? 'items-end justify-start' :
+                                'items-end justify-end' // bottom-right
+                              }`}
+                              style={{ padding: `${watermarkMargin * 0.1}px` }}
+                            >
+                              <span 
+                                style={{ 
+                                  color: watermarkColor, 
+                                  opacity: watermarkOpacity,
+                                  fontSize: `${watermarkSize * 0.3}px`,
+                                  transform: `rotate(${watermarkRotation}deg)`,
+                                  textAlign: watermarkPosition.includes('left') ? 'left' : (watermarkPosition.includes('right') ? 'right' : 'center')
+                                }}
+                                className="font-bold select-none break-all leading-tight text-center"
+                              >
+                                {watermarkText || 'SAMPLE'}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Config panel right/bottom column */}
+                      <div className="md:col-span-7 space-y-3.5">
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">Watermark Text</label>
+                          <input 
+                            type="text" 
+                            placeholder="e.g. CONFIDENTIAL, PRIVATE" 
+                            value={watermarkText}
+                            onChange={(e) => setWatermarkText(e.target.value)}
+                            className={`w-full px-3.5 py-2 rounded-xl border text-xs font-semibold focus:ring-2 focus:ring-blue-500 outline-none ${theme === 'dark' ? 'bg-slate-900 border-slate-800 placeholder-slate-600 text-white' : 'bg-white border-gray-200'}`}
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">Style</label>
+                            <select 
+                              value={watermarkStyle}
+                              onChange={(e) => setWatermarkStyle(e.target.value as any)}
+                              className={`w-full p-2 rounded-xl border text-xs font-semibold outline-none ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-gray-200'}`}
+                            >
+                              <option value="single">Single Text</option>
+                              <option value="grid">Grid Repeat</option>
+                            </select>
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">Position</label>
+                            <select 
+                              disabled={watermarkStyle === 'grid'}
+                              value={watermarkPosition}
+                              onChange={(e) => setWatermarkPosition(e.target.value as any)}
+                              className={`w-full p-2 rounded-xl border text-xs font-semibold outline-none ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white disabled:opacity-40' : 'bg-white border-gray-200 disabled:opacity-40'}`}
+                            >
+                              <option value="center">Center</option>
+                              <option value="top-left">Top Left</option>
+                              <option value="top-right">Top Right</option>
+                              <option value="bottom-left">Bottom Left</option>
+                              <option value="bottom-right">Bottom Right</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Color selection */}
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">Color Palette</label>
+                          <div className="flex items-center space-x-2">
+                            <input 
+                              type="color" 
+                              value={watermarkColor}
+                              onChange={(e) => setWatermarkColor(e.target.value)}
+                              className="w-7 h-7 rounded-lg cursor-pointer border border-gray-200 dark:border-slate-800 p-0 overflow-hidden"
+                            />
+                            <div className="flex flex-wrap gap-1.5">
+                              {['#CCCCCC', '#FF3B30', '#007AFF', '#34C759', '#FF9500'].map(c => (
+                                <button 
+                                  key={c}
+                                  type="button"
+                                  onClick={() => setWatermarkColor(c)}
+                                  className={`w-5 h-5 rounded-full border shadow-sm transition-transform hover:scale-110 ${watermarkColor === c ? 'ring-2 ring-blue-500 border-white' : 'border-gray-300 dark:border-slate-700'}`}
+                                  style={{ backgroundColor: c }}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Sliders in full-width below preview & config */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3 pt-2">
+                      <div>
+                        <div className="flex justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                          <span>Size</span>
+                          <span>{watermarkSize}px</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          min={12} 
+                          max={80} 
+                          value={watermarkSize}
+                          onChange={(e) => setWatermarkSize(Number(e.target.value))}
+                          className="w-full accent-blue-600 cursor-pointer h-1.5 bg-gray-200 dark:bg-slate-800 rounded-lg appearance-none"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                          <span>Opacity</span>
+                          <span>{Math.round(watermarkOpacity * 100)}%</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          min={0.05} 
+                          max={0.9} 
+                          step={0.05}
+                          value={watermarkOpacity}
+                          onChange={(e) => setWatermarkOpacity(Number(e.target.value))}
+                          className="w-full accent-blue-600 cursor-pointer h-1.5 bg-gray-200 dark:bg-slate-800 rounded-lg appearance-none"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                          <span>Rotation</span>
+                          <span>{watermarkRotation}°</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          min={0} 
+                          max={360} 
+                          value={watermarkRotation}
+                          onChange={(e) => setWatermarkRotation(Number(e.target.value))}
+                          className="w-full accent-blue-600 cursor-pointer h-1.5 bg-gray-200 dark:bg-slate-800 rounded-lg appearance-none"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                          <span>Margin</span>
+                          <span>{watermarkMargin}px</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          min={0} 
+                          max={100} 
+                          value={watermarkMargin}
+                          onChange={(e) => setWatermarkMargin(Number(e.target.value))}
+                          className="w-full accent-blue-600 cursor-pointer h-1.5 bg-gray-200 dark:bg-slate-800 rounded-lg appearance-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
-          <div className={`mt-6 grid grid-cols-2 gap-3`}>
-            <button onClick={() => executeExport('save')} className={`px-4 py-3 rounded-xl text-sm font-medium border flex items-center justify-center transition-colors ${theme === 'dark' ? 'border-slate-700 hover:bg-slate-800 text-slate-200' : 'border-gray-200 hover:bg-gray-50 text-gray-700'}`}>
-              {exportFormat === 'images' ? 'Save to Gallery' : 'Save to Storage'}
+          {/* Action buttons footer */}
+          <div className="pt-2 border-t border-gray-150/40 dark:border-slate-800/40 space-y-3">
+            {/* Primary Sharing Action */}
+            <button 
+              onClick={() => executeExport('share')} 
+              className="w-full py-3 px-4 bg-blue-600 text-white rounded-2xl text-sm font-bold hover:bg-blue-700 hover:shadow-lg flex items-center justify-center gap-2 active:scale-98 transition-all"
+            >
+              <Share2 className="w-4.5 h-4.5" /> Share Document Now
             </button>
-            <button onClick={() => executeExport('share')} className="px-4 py-3 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 flex items-center justify-center transition-colors">
-               Share (Other)
-            </button>
-            <button onClick={() => executeExport('email')} className={`col-span-2 px-4 py-3 border rounded-xl text-sm font-medium flex items-center justify-center transition-colors ${theme === 'dark' ? 'border-slate-700 hover:bg-slate-800 text-slate-200' : 'border-gray-200 hover:bg-gray-50 text-gray-700'}`}>
-               <Mail className="w-4 h-4 mr-2" /> Share via Email
-            </button>
-          </div>
-          
-          <div className="mt-4 flex justify-center">
-            <button onClick={() => { setShowExportModalFor(null); setExportPassword(''); setExportQuality(1); }} className={`px-4 py-2 rounded-xl text-sm font-medium ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-500 hover:bg-gray-100'}`}>
-              Cancel
-            </button>
+
+            {/* Save & Email secondary row */}
+            <div className="grid grid-cols-2 gap-3">
+              <button 
+                onClick={() => executeExport('save')} 
+                className={`py-3 px-4 rounded-2xl text-xs font-bold border flex items-center justify-center gap-2 active:scale-98 transition-all ${
+                  theme === 'dark' ? 'border-slate-800 bg-slate-950/40 text-slate-300 hover:bg-slate-800' : 'border-gray-200 bg-gray-50/50 hover:bg-gray-100 text-gray-700'
+                }`}
+              >
+                <Download className="w-4 h-4" /> 
+                {exportFormat === 'images' ? 'Save to Gallery' : 'Save to Storage'}
+              </button>
+              
+              <button 
+                onClick={() => executeExport('email')} 
+                className={`py-3 px-4 rounded-2xl text-xs font-bold border flex items-center justify-center gap-2 active:scale-98 transition-all ${
+                  theme === 'dark' ? 'border-slate-800 bg-slate-950/40 text-slate-300 hover:bg-slate-800' : 'border-gray-200 bg-gray-50/50 hover:bg-gray-100 text-gray-700'
+                }`}
+              >
+                <Mail className="w-4 h-4" /> Send via Email
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -2617,6 +2801,104 @@ export default function App() {
     );
   };
 
+  const handleBackupData = async () => {
+    try {
+      const allDocs = await getDocuments();
+      const allFolders = await getFolders();
+      const notesStr = localStorage.getItem('docscanner_quick_notes');
+      const savedNotes = notesStr ? JSON.parse(notesStr) : [];
+      
+      const backupData = {
+        documents: allDocs,
+        folders: allFolders,
+        notes: savedNotes,
+        version: 1,
+        timestamp: Date.now()
+      };
+      
+      const blob = new Blob([JSON.stringify(backupData)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `DocScanner_Backup_${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      showCustomAlert("Backup created successfully! Save this file to a secure location.");
+    } catch (e) {
+      console.error(e);
+      showCustomAlert("Failed to create backup.");
+    }
+  };
+
+  const handleRestoreData = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      
+      if (!data.documents || !data.folders) {
+        showCustomAlert("Invalid backup file format.");
+        return;
+      }
+      
+      const confirm = await showCustomConfirm("This will merge the backup with your current data. Do you want to proceed?");
+      if (!confirm) {
+        if (restoreInputRef.current) restoreInputRef.current.value = "";
+        return;
+      }
+      
+      // Save documents
+      const allDocs = await getDocuments();
+      const existingIds = new Set(allDocs.map(d => d.id));
+      for (const doc of data.documents) {
+        if (!existingIds.has(doc.id)) {
+          await saveDocument(doc);
+        }
+      }
+      
+      // Save folders
+      const allFolders = await getFolders();
+      const existingFolderIds = new Set(allFolders.map(f => f.id));
+      for (const folder of data.folders) {
+        if (!existingFolderIds.has(folder.id)) {
+          await saveFolder(folder);
+        }
+      }
+      
+      // Save notes
+      if (data.notes && Array.isArray(data.notes)) {
+        const notesStr = localStorage.getItem('docscanner_quick_notes');
+        const existingNotes = notesStr ? JSON.parse(notesStr) : [];
+        const existingNoteIds = new Set(existingNotes.map((n: any) => n.id));
+        const mergedNotes = [...existingNotes];
+        for (const note of data.notes) {
+          if (!existingNoteIds.has(note.id)) {
+            mergedNotes.push(note);
+          }
+        }
+        localStorage.setItem('docscanner_quick_notes', JSON.stringify(mergedNotes));
+        setNotes(mergedNotes);
+      }
+      
+      const freshDocs = await getDocuments();
+      const freshFolders = await getFolders();
+      setDocuments(freshDocs);
+      setFolders(freshFolders);
+      
+      showCustomAlert("Data restored successfully!");
+    } catch (e) {
+      console.error(e);
+      showCustomAlert("Failed to restore data. The file might be corrupted.");
+    } finally {
+      if (restoreInputRef.current) restoreInputRef.current.value = "";
+    }
+  };
+
   const renderSettingsTab = () => {
     return (
       <div className="space-y-6">
@@ -2697,26 +2979,42 @@ export default function App() {
         </div>
 
         <div className={`rounded-2xl border p-5 shadow-xs space-y-3 text-center ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-100'}`}>
-          <p className={`text-xs font-semibold ${theme === 'dark' ? 'text-slate-400' : 'text-gray-500'}`}>Local Storage Operations</p>
-          <button 
-            onClick={async () => {
-              const confirmClear = await showCustomConfirm("Are you sure you want to clear all scans? This action is irreversible.");
-              if (confirmClear) {
-                try {
-                  for (const d of documents) {
-                    await deleteDocument(d.id);
+          <p className={`text-xs font-semibold ${theme === 'dark' ? 'text-slate-400' : 'text-gray-500'}`}>Data Management</p>
+          
+          <div className="flex gap-2">
+            <button 
+              onClick={handleBackupData}
+              className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 ${theme === 'dark' ? 'bg-slate-800 text-blue-400 hover:bg-slate-700' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}
+            >
+              <Download className="w-4 h-4" /> Backup Data
+            </button>
+            <label className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${theme === 'dark' ? 'bg-slate-800 text-green-400 hover:bg-slate-700' : 'bg-green-50 text-green-600 hover:bg-green-100'}`}>
+              <Upload className="w-4 h-4" /> Restore Data
+              <input type="file" accept=".json" className="hidden" ref={restoreInputRef} onChange={handleRestoreData} />
+            </label>
+          </div>
+
+          <div className="pt-2">
+            <button 
+              onClick={async () => {
+                const confirmClear = await showCustomConfirm("Are you sure you want to clear all scans? This action is irreversible.");
+                if (confirmClear) {
+                  try {
+                    for (const d of documents) {
+                      await deleteDocument(d.id);
+                    }
+                    setDocuments([]);
+                    await showCustomAlert("All scans cleared successfully.");
+                  } catch (err: any) {
+                    await showCustomAlert("Error: " + err.message);
                   }
-                  setDocuments([]);
-                  await showCustomAlert("All scans cleared successfully.");
-                } catch (err: any) {
-                  await showCustomAlert("Error: " + err.message);
                 }
-              }
-            }}
-            className={`w-full py-2.5 rounded-xl text-xs font-bold transition-all ${theme === 'dark' ? 'bg-red-950/30 text-red-400 hover:bg-red-950/50' : 'bg-red-50 text-red-600 hover:bg-red-100'}`}
-          >
-            Clear All Scans Cache
-          </button>
+              }}
+              className={`w-full py-2.5 rounded-xl text-xs font-bold transition-all ${theme === 'dark' ? 'bg-red-950/30 text-red-400 hover:bg-red-950/50' : 'bg-red-50 text-red-600 hover:bg-red-100'}`}
+            >
+              Clear All Scans Cache
+            </button>
+          </div>
         </div>
       </div>
     );

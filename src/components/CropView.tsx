@@ -430,7 +430,7 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
   };
 
   return (
-    <div className="flex flex-col h-[100dvh] bg-gray-900 text-white overflow-hidden relative">
+    <div className="fixed top-0 left-0 w-full h-[100dvh] z-[200] flex flex-col bg-gray-900 text-white overflow-hidden">
       <div className="safe-pt bg-black z-20 flex-shrink-0">
         <div className="relative flex items-center justify-between px-4 h-14">
           <button 
@@ -456,19 +456,19 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
       </div>
       
       <div 
-        className={`flex-1 relative flex items-center justify-center p-8 pb-16 touch-none ${draggingIdx !== null ? 'cursor-grabbing' : 'cursor-auto'}`} 
+        className={`flex-1 min-h-0 relative flex items-center justify-center p-8 pb-16 touch-none ${draggingIdx !== null ? 'cursor-grabbing' : 'cursor-auto'}`} 
         ref={containerRef}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onPointerLeave={handlePointerUp}
       >
-        <div className="relative inline-block select-none touch-none">
+        <div className="relative inline-block select-none touch-none max-w-full max-h-full flex items-center justify-center">
           <img
             ref={imageRef}
             src={imageSrc}
             alt="Crop area"
-            className="block max-w-full max-h-[70vh] select-none shadow-md"
+            className="block max-w-full max-h-[60vh] select-none shadow-md"
             draggable={false}
             onLoad={(e) => {
                if (imageRef.current) {
@@ -496,7 +496,7 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
         )}
       </div>
       
-      <div className="bg-black border-t border-gray-800 pb-8 pt-4 safe-pb z-20">
+      <div className="bg-black border-t border-gray-800 pb-6 pt-4 safe-pb z-20 flex-shrink-0">
         {/* Preset Ratios Row */}
         <div className="flex items-center justify-start md:justify-center space-x-2.5 mb-4 px-4 overflow-x-auto hide-scrollbar w-full">
           <button

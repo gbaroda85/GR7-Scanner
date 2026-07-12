@@ -20,6 +20,8 @@ export interface Document {
   pin?: string;
   isLocked?: boolean;
   isTrash?: boolean;
+  originalDocId?: string;
+  originalPageIndex?: number;
 }
 
 export interface Folder {

@@ -101,20 +101,23 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-white">
-      {/* Header */}
-      <div className="flex items-center justify-between p-4 bg-black">
-        <button onClick={onBack} className="p-2 -ml-2 text-gray-300">
-          <ChevronLeft className="w-6 h-6" />
-        </button>
-        <h2 className="text-lg font-medium">Fine Tuning</h2>
-        <button onClick={handleSave} className="p-2 -mr-2 text-blue-400 font-medium" disabled={isProcessing || isSaving}>
-          {isSaving ? (
-             <div className="w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
-          ) : (
-             <Check className="w-6 h-6" />
-          )}
-        </button>
+    <div className="fixed top-0 left-0 w-full h-[100dvh] z-[200] flex flex-col bg-gray-900 text-white overflow-hidden">
+      <div className="safe-pt bg-black z-20 flex-shrink-0">
+        <div className="relative flex items-center justify-between px-4 h-14">
+          <button onClick={onBack} className="p-2 -ml-2 text-gray-300 active:scale-95 transition-transform touch-target">
+            <ChevronLeft className="w-6 h-6" />
+          </button>
+          <h2 className="text-sm font-medium text-gray-400 absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 pointer-events-none">
+            Fine Tuning
+          </h2>
+          <button onClick={handleSave} className="p-2 -mr-2 text-blue-400 font-bold active:scale-95 transition-transform touch-target" disabled={isProcessing || isSaving}>
+            {isSaving ? (
+               <div className="w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
+            ) : (
+               <Check className="w-7 h-7 stroke-[2.5]" />
+            )}
+          </button>
+        </div>
       </div>
       
       {/* Canvas Preview Area */}
@@ -164,7 +167,7 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
       )}
 
       {/* Footer Controls */}
-      <div className="bg-black p-4 pb-8">
+      <div className="bg-black px-4 pt-4 pb-6 safe-pb">
         <div className="flex items-center justify-between mb-6 px-2">
            <button onClick={() => setShowAdjustments(!showAdjustments)} className={`p-3 rounded-full transition-colors ${showAdjustments ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}>
               <SlidersHorizontal className="w-5 h-5" />
