@@ -2,7 +2,7 @@ import { jsPDF } from 'jspdf';
 import { Document, WatermarkOptions } from '../types';
 import { loadImage, addWatermarkToImage } from './image';
 
-export async function generatePDF(doc: Document, options?: { drawBorder?: boolean; password?: string; quality?: number; watermark?: WatermarkOptions }): Promise<Blob> {
+export async function generatePDF(doc: Document, options?: { drawBorder?: boolean; password?: string; quality?: number; watermark?: WatermarkOptions; onProgress?: (progress: number, total: number) => void }): Promise<Blob> {
   const pdfOptions: any = {
     orientation: 'portrait',
     unit: 'px',
@@ -23,6 +23,11 @@ export async function generatePDF(doc: Document, options?: { drawBorder?: boolea
   const pageHeight = pdf.internal.pageSize.getHeight();
 
   for (let i = 0; i < doc.pages.length; i++) {
+    if (options?.onProgress) {
+      options.onProgress(i + 1, doc.pages.length);
+      await new Promise(resolve => setTimeout(resolve, 10)); // Yield to allow UI update
+    }
+
     if (i > 0) {
       pdf.addPage();
     }

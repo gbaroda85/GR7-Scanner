@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { FilterType } from '../types';
-import { applyFilter } from '../lib/image';
+import { applyFilter, downscaleImage } from '../lib/image';
 import { Check, ChevronLeft, RotateCw, SlidersHorizontal } from 'lucide-react';
 
 interface FilterViewProps {
@@ -15,14 +15,23 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
   const [filter, setFilter] = useState<FilterType>(initialFilter);
   const [previewImage, setPreviewImage] = useState<string>(imageSrc);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [filterPreviews, setFilterPreviews] = useState<Record<string, string>>({});
   
   const [rotation, setRotation] = useState<number>(0);
   const [brightness, setBrightness] = useState<number>(100);
   const [contrast, setContrast] = useState<number>(100);
   const [showAdjustments, setShowAdjustments] = useState<boolean>(false);
 
-  // Use a ref to debounce
+  // डिबाउंस के लिए रिफ
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const filterOptions: { id: FilterType; label: string }[] = [
+    { id: 'original', label: 'Original' },
+    { id: 'magic', label: 'Magic' },
+    { id: 'document', label: 'Document' },
+    { id: 'photo', label: 'Photo' },
+    { id: 'bw', label: 'B & W' }
+  ];
 
   useEffect(() => {
     let active = true;
@@ -51,8 +60,36 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
         processFilter();
     }, 150);
 
-    return () => { active = false; if (timeoutRef.current) clearTimeout(timeoutRef.current); };
+    return () => { 
+      active = false; 
+      if (timeoutRef.current) clearTimeout(timeoutRef.current); 
+    };
   }, [imageSrc, filter, rotation, brightness, contrast]);
+
+  // Generate Filter Previews
+  useEffect(() => {
+    let active = true;
+    
+    const generatePreviews = async () => {
+      try {
+        const smallImg = await downscaleImage(imageSrc, 150);
+        for (const opt of filterOptions) {
+          if (!active) break;
+          // Calculate preview using the small downscaled image
+          const preview = await applyFilter(smallImg, opt.id, { rotation, brightness, contrast });
+          if (active) {
+            setFilterPreviews(prev => ({ ...prev, [opt.id]: preview }));
+          }
+        }
+      } catch (e) {
+        console.error("Preview generation failed", e);
+      }
+    };
+    
+    generatePreviews();
+    
+    return () => { active = false; };
+  }, [imageSrc, rotation, brightness, contrast]);
 
   const handleSave = () => {
     if (isProcessing || isSaving) return;
@@ -63,16 +100,9 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
     setRotation(prev => (prev + 90) % 360);
   };
 
-  const filterOptions: { id: FilterType; label: string }[] = [
-    { id: 'original', label: 'Original' },
-    { id: 'magic', label: 'Magic' },
-    { id: 'document', label: 'Document' },
-    { id: 'photo', label: 'Photo' },
-    { id: 'bw', label: 'B & W' }
-  ];
-
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-white">
+      {/* Header */}
       <div className="flex items-center justify-between p-4 bg-black">
         <button onClick={onBack} className="p-2 -ml-2 text-gray-300">
           <ChevronLeft className="w-6 h-6" />
@@ -87,6 +117,7 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
         </button>
       </div>
       
+      {/* Canvas Preview Area */}
       <div className="flex-1 relative overflow-hidden flex items-center justify-center p-4">
         {isProcessing && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-900 bg-opacity-50">
@@ -100,6 +131,7 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
         />
       </div>
       
+      {/* Brightness & Contrast Adjustments Panel */}
       {showAdjustments && (
         <div className="bg-gray-800 p-6 space-y-6 rounded-t-2xl shadow-lg border-t border-gray-700">
            <div>
@@ -131,6 +163,7 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
         </div>
       )}
 
+      {/* Footer Controls */}
       <div className="bg-black p-4 pb-8">
         <div className="flex items-center justify-between mb-6 px-2">
            <button onClick={() => setShowAdjustments(!showAdjustments)} className={`p-3 rounded-full transition-colors ${showAdjustments ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}>
@@ -141,17 +174,26 @@ export default function FilterView({ imageSrc, initialFilter = 'magic', onSave, 
            </button>
         </div>
 
-        <div className="flex overflow-x-auto hide-scrollbar space-x-8 px-2 pb-2">
+        {/* Filter List */}
+        <div className="flex overflow-x-auto hide-scrollbar space-x-6 px-2 pb-2">
            {filterOptions.map(opt => (
              <button
                key={opt.id}
                onClick={() => setFilter(opt.id)}
-               className={`flex flex-col items-center justify-center flex-shrink-0 space-y-2 transition-colors ${
-                 filter === opt.id ? 'text-blue-400' : 'text-gray-400 hover:text-gray-200'
+               className={`flex flex-col items-center justify-center flex-shrink-0 space-y-2 transition-all ${
+                 filter === opt.id ? 'text-blue-400 scale-105' : 'text-gray-400 hover:text-gray-200'
                }`}
              >
-               <span className="text-sm font-medium whitespace-nowrap">{opt.label}</span>
-               <div className={`w-1.5 h-1.5 rounded-full ${filter === opt.id ? 'bg-blue-400' : 'bg-transparent'}`}></div>
+               <div className={`w-14 h-20 sm:w-16 sm:h-24 bg-gray-800 rounded-md overflow-hidden border-2 ${filter === opt.id ? 'border-blue-400' : 'border-transparent'}`}>
+                 {filterPreviews[opt.id] ? (
+                   <img src={filterPreviews[opt.id]} alt={opt.label} className="w-full h-full object-cover" />
+                 ) : (
+                   <div className="w-full h-full flex items-center justify-center">
+                     <div className="w-4 h-4 border-2 border-gray-500 border-t-transparent rounded-full animate-spin"></div>
+                   </div>
+                 )}
+               </div>
+               <span className="text-xs sm:text-sm font-medium whitespace-nowrap">{opt.label}</span>
              </button>
            ))}
         </div>

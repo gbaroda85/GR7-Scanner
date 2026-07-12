@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Point } from '../types';
 import { detectDocumentCorners } from '../lib/image';
+import { Scan, Maximize, FileText, CreditCard } from 'lucide-react';
 
 interface CropViewProps {
   key?: string;
@@ -20,6 +21,68 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
   const [imageSize, setImageSize] = useState({ width: 0, height: 0, naturalWidth: 0, naturalHeight: 0 });
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
 
+  const detectedCornersRef = useRef<Point[] | null>(null);
+  const [activePreset, setActivePreset] = useState<string>('auto');
+
+  const applyPreset = (presetType: string) => {
+    const natW = imageSize.naturalWidth || (imageRef.current?.naturalWidth || 0);
+    const natH = imageSize.naturalHeight || (imageRef.current?.naturalHeight || 0);
+    if (!natW || !natH) return;
+
+    if (presetType === 'auto') {
+      if (detectedCornersRef.current) {
+        setCorners(detectedCornersRef.current);
+      } else {
+        const marginX = natW * 0.05;
+        const marginY = natH * 0.05;
+        setCorners([
+          { x: marginX, y: marginY },
+          { x: natW - marginX, y: marginY },
+          { x: natW - marginX, y: natH - marginY },
+          { x: marginX, y: natH - marginY }
+        ]);
+      }
+      return;
+    }
+
+    if (presetType === 'full') {
+      setCorners([
+        { x: 0, y: 0 },
+        { x: natW, y: 0 },
+        { x: natW, y: natH },
+        { x: 0, y: natH }
+      ]);
+      return;
+    }
+
+    const isLandscape = natW >= natH;
+    let ratio = 1;
+    if (presetType === 'A4') {
+      ratio = isLandscape ? 1.4142 : 0.7071;
+    } else if (presetType === 'letter') {
+      ratio = isLandscape ? (11 / 8.5) : (8.5 / 11);
+    } else if (presetType === 'id_card') {
+      ratio = isLandscape ? 1.5858 : 0.6306;
+    }
+
+    let w = natW * 0.85;
+    let h = w / ratio;
+    if (h > natH * 0.85) {
+      h = natH * 0.85;
+      w = h * ratio;
+    }
+
+    const x = (natW - w) / 2;
+    const y = (natH - h) / 2;
+
+    setCorners([
+      { x: x, y: y },
+      { x: x + w, y: y },
+      { x: x + w, y: y + h },
+      { x: x, y: y + h }
+    ]);
+  };
+
   useEffect(() => {
     let hasDetectedSuccessfully = false;
     const img = new Image();
@@ -29,11 +92,13 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
       
       if (initialCorners) {
         setCorners(initialCorners);
+        detectedCornersRef.current = initialCorners;
       } else {
         try {
           const detected = detectDocumentCorners(img);
           if (detected) {
             setCorners(detected);
+            detectedCornersRef.current = detected;
             hasDetectedSuccessfully = true;
           } else {
             fallbackCorners();
@@ -48,12 +113,16 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
         // Default to a margin of 5% inside the image
         const marginX = img.width * 0.05;
         const marginY = img.height * 0.05;
-        setCorners([
+        const fallback = [
           { x: marginX, y: marginY },
           { x: img.width - marginX, y: marginY },
           { x: img.width - marginX, y: img.height - marginY },
           { x: marginX, y: img.height - marginY }
-        ]);
+        ];
+        setCorners(fallback);
+        if (!detectedCornersRef.current) {
+          detectedCornersRef.current = fallback;
+        }
       }
     };
     img.onerror = () => {
@@ -61,12 +130,14 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
       const fallbackW = 800;
       const fallbackH = 1000;
       setImageSize(prev => ({ ...prev, naturalWidth: fallbackW, naturalHeight: fallbackH }));
-      setCorners([
+      const fallback = [
         { x: 50, y: 50 },
         { x: fallbackW - 50, y: 50 },
         { x: fallbackW - 50, y: fallbackH - 50 },
         { x: 50, y: fallbackH - 50 }
-      ]);
+      ];
+      setCorners(fallback);
+      detectedCornersRef.current = fallback;
     };
 
     // If initialCorners is not provided and we haven't successfully detected with OpenCV yet,
@@ -83,6 +154,7 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
               const detected = detectDocumentCorners(retryImg);
               if (detected) {
                 setCorners(detected);
+                detectedCornersRef.current = detected;
                 hasDetectedSuccessfully = true;
               }
             } catch (err) {
@@ -128,12 +200,15 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
        window.removeEventListener('resize', updateSize);
        observer.disconnect();
     };
-  }, []);
+  }, [imageSrc]);
 
-  const handlePointerDown = (idx: number) => (e: any) => {
-    if (e.cancelable && e.type !== 'mousedown') e.preventDefault();
+  const handlePointerDown = (idx: number) => (e: React.PointerEvent<HTMLDivElement>) => {
     if (isProcessing) return;
-    // e.currentTarget.setPointerCapture(e.pointerId); // Removed as it causes issues on some devices
+    
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    
     setDraggingIdx(idx);
     
     // Vibrate on touch if supported
@@ -142,14 +217,19 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
     }
   };
 
-  const handleMove = useCallback((clientX: number, clientY: number) => {
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
     if (draggingIdx === null || !imageRef.current || isProcessing) return;
+    
+    const clientX = e.clientX;
+    const clientY = e.clientY;
     
     const rect = imageRef.current.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
     
-    const scaleX = (imageSize.naturalWidth || imageRef.current.naturalWidth) / rect.width;
-    const scaleY = (imageSize.naturalHeight || imageRef.current.naturalHeight) / rect.height;
+    const natW = imageSize.naturalWidth || imageRef.current.naturalWidth;
+    const natH = imageSize.naturalHeight || imageRef.current.naturalHeight;
+    const scaleX = natW / rect.width;
+    const scaleY = natH / rect.height;
 
     if (isNaN(scaleX) || isNaN(scaleY) || !isFinite(scaleX) || !isFinite(scaleY)) return;
 
@@ -157,52 +237,104 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
     let y = (clientY - rect.top) * scaleY;
 
     // Clamp to image bounds
-    x = Math.max(0, Math.min(x, imageSize.naturalWidth || imageRef.current.naturalWidth));
-    y = Math.max(0, Math.min(y, imageSize.naturalHeight || imageRef.current.naturalHeight));
+    x = Math.max(0, Math.min(x, natW));
+    y = Math.max(0, Math.min(y, natH));
 
-    setCorners(prev => {
-      const next = [...prev];
-      next[draggingIdx] = { x, y };
-      return next;
-    });
-  }, [draggingIdx, imageSize, isProcessing]);
+    const isLockedRatio = ['A4', 'letter', 'id_card'].includes(activePreset);
+    const isRectangleOnly = activePreset === 'full';
 
-  const handlePointerMove = useCallback((e: PointerEvent) => {
-    handleMove(e.clientX, e.clientY);
-  }, [handleMove]);
+    if (isLockedRatio || isRectangleOnly) {
+      // Find diagonal anchor (opposite corner)
+      let ax = 0;
+      let ay = 0;
+      if (draggingIdx === 0) {
+        ax = corners[2].x;
+        ay = corners[2].y;
+      } else if (draggingIdx === 1) {
+        ax = corners[3].x;
+        ay = corners[3].y;
+      } else if (draggingIdx === 2) {
+        ax = corners[0].x;
+        ay = corners[0].y;
+      } else if (draggingIdx === 3) {
+        ax = corners[1].x;
+        ay = corners[1].y;
+      }
 
-  const handleTouchMove = useCallback((e: TouchEvent) => {
-    if (e.cancelable) e.preventDefault();
-    if (e.touches.length > 0) {
-      handleMove(e.touches[0].clientX, e.touches[0].clientY);
+      const dx = x - ax;
+      const dy = y - ay;
+      const signX = dx >= 0 ? 1 : -1;
+      const signY = dy >= 0 ? 1 : -1;
+
+      let newX = x;
+      let newY = y;
+
+      if (isLockedRatio) {
+        let R = 1;
+        const isLandscape = natW >= natH;
+        if (activePreset === 'A4') {
+          R = isLandscape ? 1.4142 : 0.7071;
+        } else if (activePreset === 'letter') {
+          R = isLandscape ? (11 / 8.5) : (8.5 / 11);
+        } else if (activePreset === 'id_card') {
+          R = isLandscape ? 1.5858 : 0.6306;
+        }
+
+        let W = Math.abs(dx);
+        let H = Math.abs(dy);
+
+        // Keep them proportional to aspect ratio R
+        if (W / R > H) {
+          H = W / R;
+        } else {
+          W = H * R;
+        }
+
+        const maxW = signX >= 0 ? (natW - ax) : ax;
+        const maxH = signY >= 0 ? (natH - ay) : ay;
+        const limitW = Math.min(maxW, maxH * R);
+
+        if (W > limitW) {
+          W = limitW;
+          H = W / R;
+        }
+
+        newX = ax + (W * signX);
+        newY = ay + (H * signY);
+      }
+
+      const x_left = Math.min(ax, newX);
+      const x_right = Math.max(ax, newX);
+      const y_top = Math.min(ay, newY);
+      const y_bottom = Math.max(ay, newY);
+
+      setCorners([
+        { x: x_left, y: y_top },
+        { x: x_right, y: y_top },
+        { x: x_right, y: y_bottom },
+        { x: x_left, y: y_bottom }
+      ]);
+    } else {
+      // Freeform movement
+      if (activePreset === 'auto') {
+        setActivePreset('');
+      }
+
+      setCorners(prev => {
+        const next = [...prev];
+        next[draggingIdx] = { x, y };
+        return next;
+      });
     }
-  }, [handleMove]);
+  }, [draggingIdx, imageSize, isProcessing, activePreset, corners, setActivePreset]);
 
   const handlePointerUp = useCallback(() => {
     setDraggingIdx(null);
   }, []);
 
-  const handleTouchEnd = useCallback(() => {
-    setDraggingIdx(null);
-  }, []);
-
   useEffect(() => {
-    if (draggingIdx !== null) {
-      window.addEventListener('pointermove', handlePointerMove);
-      window.addEventListener('touchmove', handleTouchMove, { passive: false });
-      window.addEventListener('pointerup', handlePointerUp);
-      window.addEventListener('touchend', handlePointerUp);
-      window.addEventListener('touchcancel', handlePointerUp);
-      window.addEventListener('pointercancel', handlePointerUp);
-    }
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('touchend', handlePointerUp);
-      window.removeEventListener('touchcancel', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerUp);
-    };
+    // We are now handling events on the container div
+    // window events are removed
   }, [draggingIdx, handlePointerMove, handlePointerUp]);
 
   const renderCorners = () => {
@@ -217,17 +349,14 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
       <div
         key={i}
         onPointerDown={handlePointerDown(i)}
-        onTouchStart={handlePointerDown(i) as any}
-        onMouseDown={handlePointerDown(i) as any}
-        className="absolute flex items-center justify-center cursor-move transform -translate-x-1/2 -translate-y-1/2 touch-none select-none z-[100]"
+        className="absolute w-16 h-16 flex items-center justify-center cursor-move transform -translate-x-1/2 -translate-y-1/2 touch-none select-none z-[100]"
         style={{
           left: `${c.x * scaleX}px`,
           top: `${c.y * scaleY}px`,
-          width: '100px',
-          height: '100px',
+          padding: '10px'
         }}
       >
-        <div className={`w-10 h-10 rounded-full border-4 border-white shadow-[0_0_15px_rgba(0,0,0,0.5)] transition-all duration-75 ${draggingIdx === i ? 'bg-blue-400 scale-125 ring-4 ring-blue-500/50' : 'bg-blue-500 active:scale-110'}`} />
+        <div className={`w-8 h-8 rounded-full border-[3px] border-white shadow-[0_0_10px_rgba(0,0,0,0.5)] transition-all duration-75 ${draggingIdx === i ? 'bg-blue-400 scale-125 ring-4 ring-blue-500/40' : 'bg-blue-500 active:scale-110'}`} />
       </div>
     ));
   };
@@ -302,28 +431,39 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
 
   return (
     <div className="flex flex-col h-[100dvh] bg-gray-900 text-white overflow-hidden relative">
-      <div className="flex items-center justify-between p-4 bg-black z-20">
-        <div className="flex items-center space-x-2">
+      <div className="safe-pt bg-black z-20 flex-shrink-0">
+        <div className="relative flex items-center justify-between px-4 h-14">
           <button 
             onClick={onCancel} 
             disabled={isProcessing} 
-            className="px-3 py-1 text-gray-300 disabled:opacity-50 text-sm"
+            className="touch-target px-3 py-1 text-gray-300 disabled:opacity-50 text-sm"
           >
             Cancel
           </button>
+          
+          <h2 className="text-sm font-medium text-gray-400 absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 pointer-events-none">
+            Adjust Crop
+          </h2>
+          
+          <button 
+            onClick={() => onCrop(corners)} 
+            disabled={isProcessing} 
+            className="px-5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-full font-bold text-sm shadow-md active:scale-95 transition-all disabled:opacity-50 h-9 flex items-center justify-center"
+          >
+            Next
+          </button>
         </div>
-        <h2 className="text-sm font-medium text-gray-400 absolute left-1/2 -translate-x-1/2 pointer-events-none">Adjust Crop</h2>
-        <button 
-          onClick={() => onCrop(corners)} 
-          disabled={isProcessing} 
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-sm shadow-lg active:scale-95 transition-all disabled:opacity-50"
-        >
-          Next
-        </button>
       </div>
       
-      <div className={`flex-1 relative flex items-center justify-center p-8 pb-16 touch-none ${draggingIdx !== null ? 'cursor-grabbing' : 'cursor-auto'}`} ref={containerRef}>
-        <div className="relative inline-block select-none">
+      <div 
+        className={`flex-1 relative flex items-center justify-center p-8 pb-16 touch-none ${draggingIdx !== null ? 'cursor-grabbing' : 'cursor-auto'}`} 
+        ref={containerRef}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onPointerLeave={handlePointerUp}
+      >
+        <div className="relative inline-block select-none touch-none">
           <img
             ref={imageRef}
             src={imageSrc}
@@ -356,8 +496,87 @@ export default function CropView({ imageSrc, initialCorners, onCrop, onCancel, i
         )}
       </div>
       
-      <div className="p-6 bg-black text-center text-sm text-gray-400">
-        Drag the corners to fit the document
+      <div className="bg-black border-t border-gray-800 pb-8 pt-4 safe-pb z-20">
+        {/* Preset Ratios Row */}
+        <div className="flex items-center justify-start md:justify-center space-x-2.5 mb-4 px-4 overflow-x-auto hide-scrollbar w-full">
+          <button
+            onClick={() => {
+              setActivePreset('auto');
+              applyPreset('auto');
+            }}
+            className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center space-x-1.5 ${
+              activePreset === 'auto'
+                ? 'bg-blue-600 text-white shadow-md scale-105'
+                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            <Scan className="w-3.5 h-3.5" />
+            <span>Auto Detect</span>
+          </button>
+          <button
+            onClick={() => {
+              setActivePreset('full');
+              applyPreset('full');
+            }}
+            className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center space-x-1.5 ${
+              activePreset === 'full'
+                ? 'bg-blue-600 text-white shadow-md scale-105'
+                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            <Maximize className="w-3.5 h-3.5" />
+            <span>Full Page</span>
+          </button>
+          <button
+            onClick={() => {
+              setActivePreset('A4');
+              applyPreset('A4');
+            }}
+            className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center space-x-1.5 ${
+              activePreset === 'A4'
+                ? 'bg-blue-600 text-white shadow-md scale-105'
+                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>A4</span>
+            <span className="text-[10px] opacity-60 font-normal">(1:1.41)</span>
+          </button>
+          <button
+            onClick={() => {
+              setActivePreset('letter');
+              applyPreset('letter');
+            }}
+            className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center space-x-1.5 ${
+              activePreset === 'letter'
+                ? 'bg-blue-600 text-white shadow-md scale-105'
+                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Letter</span>
+            <span className="text-[10px] opacity-60 font-normal">(1:1.29)</span>
+          </button>
+          <button
+            onClick={() => {
+              setActivePreset('id_card');
+              applyPreset('id_card');
+            }}
+            className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center space-x-1.5 ${
+              activePreset === 'id_card'
+                ? 'bg-blue-600 text-white shadow-md scale-105'
+                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            <CreditCard className="w-3.5 h-3.5" />
+            <span>ID Card</span>
+            <span className="text-[10px] opacity-60 font-normal">(1:1.59)</span>
+          </button>
+        </div>
+
+        <div className="text-center text-xs text-gray-400">
+          Drag the corners or choose a standard preset for precise cropping
+        </div>
       </div>
     </div>
   );

@@ -1,7 +1,32 @@
-import { convertFilesToImageFiles } from "./lib/fileImport";
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { FileDown, Camera, Image as ImageIcon, Plus, FileText, ChevronRight, Download, Trash2, ArrowLeft, Share2, CheckSquare, Square, X, ArrowDownUp, LayoutGrid, List as ListIcon, FolderInput, FolderPlus, Combine, Pencil, Check, Search, ArrowUp, ArrowDown, GripVertical, Home, StickyNote, User, Settings, Sun, Moon, Crop, MoreVertical, Lock, Unlock, FileArchive, FolderOpen, Mail, Undo, ZoomIn, ZoomOut } from 'lucide-react';
+import { Camera, Image as ImageIcon, Plus, FileText, ChevronRight, ChevronDown, Download, Trash2, ArrowLeft, Share2, CheckSquare, Square, X, ArrowDownUp, LayoutGrid, List as ListIcon, FolderInput, FolderPlus, Combine, Pencil, Check, Search, ArrowUp, ArrowDown, GripVertical, Home, StickyNote, User, Settings, Sun, Moon, Crop, MoreVertical, Lock, Unlock, FileArchive, FolderOpen, Mail, Undo, ZoomIn, ZoomOut, Info, Layers, Sparkles, Eye } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { Capacitor } from '@capacitor/core';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+import { App as CapApp } from '@capacitor/app';
+import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
+
+export const triggerHapticLight = async (type?: 'scan' | 'export' | 'delete') => {
+  if (type && localStorage.getItem(`docscanner_haptic_${type}`) === 'false') return;
+  try {
+    await Haptics.impact({ style: ImpactStyle.Light });
+  } catch (e) {}
+};
+
+export const triggerHapticMedium = async (type?: 'scan' | 'export' | 'delete') => {
+  if (type && localStorage.getItem(`docscanner_haptic_${type}`) === 'false') return;
+  try {
+    await Haptics.impact({ style: ImpactStyle.Medium });
+  } catch (e) {}
+};
+
+export const triggerHapticSuccess = async (type?: 'scan' | 'export' | 'delete') => {
+  if (type && localStorage.getItem(`docscanner_haptic_${type}`) === 'false') return;
+  try {
+    await Haptics.notification({ type: NotificationType.Success });
+  } catch (e) {}
+};
 import { getDocuments, saveDocument, deleteDocument, getFolders, saveFolder, deleteFolder } from './lib/store';
 import { Document, DocumentPage, Point, FilterType, Folder, QueueItem, WatermarkOptions } from './types';
 import CropView from './components/CropView';
@@ -9,6 +34,28 @@ import FilterView from './components/FilterView';
 import { warpPerspective, downscaleImage, detectDocumentCorners, applyFilter, loadImage, addWatermarkToImage } from './lib/image';
 import { generatePDF } from './lib/pdf';
 import JSZip from 'jszip';
+
+import ZoomableImage from './components/ZoomableImage';
+import CameraView from "./components/CameraView";
+
+
+const isAndroidWebView = () => {
+  const ua = navigator.userAgent.toLowerCase();
+  return ua.includes("wv") || (ua.includes("android") && ua.includes("median")) || Capacitor.isNativePlatform();
+};
+
+const blobToBase64 = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64String = reader.result as string;
+      // Remove the prefix (e.g., "data:application/pdf;base64,")
+      resolve(base64String.split(',')[1]);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+};
 
 type AppState = 'home' | 'view_doc' | 'crop' | 'filter';
 type SortOrder = 'newest' | 'oldest' | 'alpha';
@@ -83,6 +130,14 @@ export default function App() {
   const [croppedImage, setCroppedImage] = useState<string | null>(null);
   const [currentCorners, setCurrentCorners] = useState<Point[] | undefined>();
   const [processingQueue, setProcessingQueue] = useState<QueueItem[]>([]);
+  // Haptic settings state
+  const [hapticScan, setHapticScan] = useState(localStorage.getItem('docscanner_haptic_scan') !== 'false');
+  const [hapticExport, setHapticExport] = useState(localStorage.getItem('docscanner_haptic_export') !== 'false');
+  const [hapticDelete, setHapticDelete] = useState(localStorage.getItem('docscanner_haptic_delete') !== 'false');
+
+  useEffect(() => { localStorage.setItem('docscanner_haptic_scan', hapticScan.toString()); }, [hapticScan]);
+  useEffect(() => { localStorage.setItem('docscanner_haptic_export', hapticExport.toString()); }, [hapticExport]);
+  useEffect(() => { localStorage.setItem('docscanner_haptic_delete', hapticDelete.toString()); }, [hapticDelete]);
   
   // Tab navigation states
   const [fullScreenImage, setFullScreenImage] = useState<string | null>(null);
@@ -105,6 +160,9 @@ export default function App() {
   const [watermarkPosition, setWatermarkPosition] = useState<'center' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'>('center');
   const [watermarkRotation, setWatermarkRotation] = useState<number>(0);
   const [watermarkMargin, setWatermarkMargin] = useState<number>(20);
+  const [showCustomCamera, setShowCustomCamera] = useState(false);
+  const [cameraMode, setCameraMode] = useState<"single"|"batch">("single");
+
 
   // Notes state
   const [noteSearchQuery, setNoteSearchQuery] = useState('');
@@ -112,6 +170,7 @@ export default function App() {
     try {
       const stored = localStorage.getItem('docscanner_quick_notes');
       return stored ? JSON.parse(stored) : [
+
         { id: '1', title: 'Receipt Scan To-Do', content: 'Remember to group receipt scans by month. Put restaurant receipts in the "Expenses" folder.', createdAt: Date.now() - 3600000 * 2, colorIndex: 0 },
         { id: '2', title: 'Meeting Notes Checklist', content: 'After scanning meeting notes, tap on "Filter" and choose the "Magic" filter. It makes the black pen text pop perfectly on white paper!', createdAt: Date.now() - 3600000 * 12, colorIndex: 1 }
       ];
@@ -130,19 +189,6 @@ export default function App() {
   const [newNoteColor, setNewNoteColor] = useState(0);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
 
-
-  const [autoCleanupDays, setAutoCleanupDays] = useState<number>(() => {
-    try {
-      const stored = localStorage.getItem('docscanner_cleanup');
-      return stored ? parseInt(stored, 10) : 30;
-    } catch {
-      return 30;
-    }
-  });
-
-  useEffect(() => {
-    localStorage.setItem('docscanner_cleanup', autoCleanupDays.toString());
-  }, [autoCleanupDays]);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
       const stored = localStorage.getItem('docscanner_theme');
@@ -155,6 +201,61 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('docscanner_theme', theme);
   }, [theme]);
+
+  // Profile details state with local persistence
+  const [profileName, setProfileName] = useState<string>(() => {
+    try {
+      return localStorage.getItem('docscanner_profile_name') || 'Image PDF Scanner';
+    } catch {
+      return 'Image PDF Scanner';
+    }
+  });
+
+  const [profileEmail, setProfileEmail] = useState<string>(() => {
+    try {
+      return localStorage.getItem('docscanner_profile_email') || 'gr7.gbaroda85@gmail.com';
+    } catch {
+      return 'gr7.gbaroda85@gmail.com';
+    }
+  });
+
+  const [profileTier, setProfileTier] = useState<string>(() => {
+    try {
+      return localStorage.getItem('docscanner_profile_tier') || 'PRO ACTIVE';
+    } catch {
+      return 'PRO ACTIVE';
+    }
+  });
+
+  const [profileAvatarColor, setProfileAvatarColor] = useState<string>(() => {
+    try {
+      return localStorage.getItem('docscanner_profile_avatar_color') || 'from-blue-500 to-indigo-600';
+    } catch {
+      return 'from-blue-500 to-indigo-600';
+    }
+  });
+
+  useEffect(() => {
+    localStorage.setItem('docscanner_profile_name', profileName);
+  }, [profileName]);
+
+  useEffect(() => {
+    localStorage.setItem('docscanner_profile_email', profileEmail);
+  }, [profileEmail]);
+
+  useEffect(() => {
+    localStorage.setItem('docscanner_profile_tier', profileTier);
+  }, [profileTier]);
+
+  useEffect(() => {
+    localStorage.setItem('docscanner_profile_avatar_color', profileAvatarColor);
+  }, [profileAvatarColor]);
+
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editTier, setEditTier] = useState('');
+  const [editAvatarColor, setEditAvatarColor] = useState('');
 
   const NOTE_COLORS = theme === 'dark' ? [
     { bg: 'bg-purple-950/20 hover:bg-purple-950/35 border-purple-900/40', text: 'text-purple-200', tag: 'bg-purple-900/30 text-purple-300', activeRing: 'ring-purple-500' },
@@ -196,12 +297,24 @@ export default function App() {
   const [showLockSetupFor, setShowLockSetupFor] = useState<string | null>(null);
   const [showFolderSelectFor, setShowFolderSelectFor] = useState<string | null>(null);
   const [showMultiFolderSelect, setShowMultiFolderSelect] = useState<boolean>(false);
+  const [showApkHelp, setShowApkHelp] = useState<boolean>(false);
   const [showExportModalFor, setShowExportModalFor] = useState<string | null>(null);
   const [exportPassword, setExportPassword] = useState('');
   const [exportQuality, setExportQuality] = useState<number>(1);
   const [exportFormat, setExportFormat] = useState<'pdf' | 'images' | 'zip'>('pdf');
   const [tempPin, setTempPin] = useState('');
   const [activeActionDocId, setActiveActionDocId] = useState<string | null>(null);
+  const [pdfExportProgress, setPdfExportProgress] = useState<{current: number, total: number} | null>(null);
+  
+  // Animated Splash Screen state
+  const [showSplash, setShowSplash] = useState(true);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setShowSplash(false);
+    }, 2800);
+    return () => clearTimeout(timer);
+  }, []);
   
   // Custom non-blocking Confirm & Prompt States
   const [confirmState, setConfirmState] = useState<{
@@ -220,6 +333,159 @@ export default function App() {
     message: string;
     resolve: () => void;
   } | null>(null);
+
+  // Back button handling on Android/Native
+  const backStateRef = useRef({
+    confirmState,
+    promptState,
+    alertState,
+    showCustomCamera,
+    showExportModalFor,
+    activeMenuDocId,
+    showFolderSelectFor,
+    showMultiFolderSelect,
+    showPinModalFor,
+    showLockSetupFor,
+    showAddNoteModal,
+    editingNoteId,
+    fullScreenImage,
+    isMultiSelect,
+    appState,
+    currentTab,
+    currentDoc,
+    isEditingProfile,
+  });
+
+  useEffect(() => {
+    backStateRef.current = {
+      confirmState,
+      promptState,
+      alertState,
+      showCustomCamera,
+      showExportModalFor,
+      activeMenuDocId,
+      showFolderSelectFor,
+      showMultiFolderSelect,
+      showPinModalFor,
+      showLockSetupFor,
+      showAddNoteModal,
+      editingNoteId,
+      fullScreenImage,
+      isMultiSelect,
+      appState,
+      currentTab,
+      currentDoc,
+      isEditingProfile,
+    };
+  });
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    const handleBackButton = async () => {
+      const s = backStateRef.current;
+
+      // 1. Custom Alerts, Prompts, Confirms
+      if (s.alertState) {
+        s.alertState.resolve();
+        setAlertState(null);
+        return;
+      }
+      if (s.confirmState) {
+        s.confirmState.resolve(false);
+        setConfirmState(null);
+        return;
+      }
+      if (s.promptState) {
+        s.promptState.resolve(null);
+        setPromptState(null);
+        return;
+      }
+
+      // 2. Full screen image
+      if (s.fullScreenImage) {
+        setFullScreenImage(null);
+        return;
+      }
+
+      // 3. Modals and overlays
+      if (s.showExportModalFor) {
+        setShowExportModalFor(null);
+        return;
+      }
+      if (s.showFolderSelectFor) {
+        setShowFolderSelectFor(null);
+        return;
+      }
+      if (s.showMultiFolderSelect) {
+        setShowMultiFolderSelect(false);
+        return;
+      }
+      if (s.showPinModalFor) {
+        setShowPinModalFor(null);
+        return;
+      }
+      if (s.showLockSetupFor) {
+        setShowLockSetupFor(null);
+        return;
+      }
+      if (s.activeMenuDocId) {
+        setActiveMenuDocId(null);
+        return;
+      }
+      if (s.showAddNoteModal) {
+        setShowAddNoteModal(false);
+        return;
+      }
+      if (s.editingNoteId) {
+        setEditingNoteId(null);
+        return;
+      }
+      if (s.isEditingProfile) {
+        setIsEditingProfile(false);
+        return;
+      }
+
+      // 4. Custom Camera UI
+      if (s.showCustomCamera) {
+        setShowCustomCamera(false);
+        return;
+      }
+
+      // 5. Multi-selection
+      if (s.isMultiSelect) {
+        setIsMultiSelect(false);
+        setSelectedDocs(new Set());
+        return;
+      }
+
+      // 6. Sub-screens / Sub-states
+      if (s.appState === 'crop' || s.appState === 'filter') {
+        setAppState('view_doc');
+        return;
+      }
+      if (s.appState === 'view_doc') {
+        setCurrentDoc(null);
+        setAppState('home');
+        return;
+      }
+
+      // 7. Navigation Tabs
+      if (s.currentTab !== 'home') {
+        setCurrentTab('home');
+        return;
+      }
+
+      // 8. If nothing is open and we are on home view, exit the app
+      CapApp.exitApp();
+    };
+
+    const backListener = CapApp.addListener('backButton', handleBackButton);
+
+    return () => {
+      backListener.then(l => l.remove());
+    };
+  }, []);
 
   const showCustomConfirm = (message: string): Promise<boolean> => {
     return new Promise((resolve) => {
@@ -452,84 +718,35 @@ export default function App() {
     getFolders().then(setFolders);
   }, []);
 
-  
-  
-  useEffect(() => {
-    // Handle files shared via share_target (mobile)
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data && event.data.type === 'SHARED_FILES') {
-        const files = event.data.files as File[];
-        if (files && files.length > 0) {
-          processIncomingFiles(files);
-        }
-      }
-    };
+  const handleCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []) as File[];
+    handleFilesSelected(files);
+    e.target.value = "";
+  };
+  const handleFilesSelected = async (files: File[]) => {
+    if (files.length === 0) return;
     
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.addEventListener('message', handleMessage);
-      
-      // Tell SW we are ready to receive any pending shared files
-      if (navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: 'APP_READY' });
-      }
-    }
-
-    // Handle files opened via file_handlers (desktop)
-    if ('launchQueue' in window) {
-      (window as any).launchQueue.setConsumer(async (launchParams: any) => {
-        if (launchParams.files && launchParams.files.length > 0) {
-          const files: File[] = [];
-          for (const handle of launchParams.files) {
-            const file = await handle.getFile();
-            files.push(file);
-          }
-          if (files.length > 0) {
-            processIncomingFiles(files);
-          }
-        }
-      });
-    }
-
-    return () => {
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.removeEventListener('message', handleMessage);
-      }
-    };
-  }, []);
-  
-const processIncomingFiles = async (rawFiles: File[]) => {
-    if (rawFiles.length === 0) return;
-    setIsProcessingBatch(true);
-    setTotalBatchFiles(rawFiles.length);
-    setProcessedBatchFiles(0);
-    
-    // Check if we need to convert PDFs to images
-    const files = await convertFilesToImageFiles(rawFiles, (msg) => {
-      // We can use an existing progress text state, or just console.log
-      console.log(msg);
-    });
-
-    if (files.length === 0) {
-      setIsProcessingBatch(false);
-      return;
-    }
-
     setTotalBatchFiles(files.length);
     setProcessedBatchFiles(0);
+    setIsProcessingBatch(true);
     
+    // Helper to process a single file: read, downscale, load, and detect corners
     const processFile = async (file: File): Promise<QueueItem | null> => {
       let objectUrl: string | null = null;
       try {
         objectUrl = URL.createObjectURL(file);
+
         if (!objectUrl) {
           setProcessedBatchFiles(prev => Math.min(prev + 1, files.length));
           return null;
         }
 
+        // Downscale to 2400 max dimension
         let finalUrl = '';
         try {
            finalUrl = await downscaleImage(objectUrl, 2400);
         } catch (e) {
+           // Fallback to Data URL if downscale fails so we don't return a revoked Object URL
            finalUrl = await new Promise<string>((resolve) => {
              const reader = new FileReader();
              reader.onload = (e) => resolve((e.target?.result as string) || '');
@@ -537,9 +754,21 @@ const processIncomingFiles = async (rawFiles: File[]) => {
            });
         }
 
+        // Load image to run corner detection
         const img = await loadImage(finalUrl);
-        let corners = detectDocumentCorners(img);
+        let corners: Point[] | null = null;
         
+        // Check if the file has relative corners pre-attached from real-time CameraView detection
+        if ((file as any).relativeCorners && Array.isArray((file as any).relativeCorners) && (file as any).relativeCorners.length === 4) {
+          corners = (file as any).relativeCorners.map((pt: Point) => ({
+            x: pt.x * img.width,
+            y: pt.y * img.height
+          }));
+        } else {
+          corners = detectDocumentCorners(img);
+        }
+        
+        // If detection fails, provide default corners (10% margin) so the page is still processed
         if (!corners) {
           const marginW = img.width * 0.1;
           const marginH = img.height * 0.1;
@@ -554,7 +783,10 @@ const processIncomingFiles = async (rawFiles: File[]) => {
         if (objectUrl) URL.revokeObjectURL(objectUrl);
 
         setProcessedBatchFiles(prev => Math.min(prev + 1, files.length));
-        return { url: finalUrl, corners: corners };
+        return {
+          url: finalUrl,
+          corners: corners
+        };
       } catch (err) {
         console.error("Error processing file in queue:", err);
         if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -563,16 +795,22 @@ const processIncomingFiles = async (rawFiles: File[]) => {
       }
     };
 
+    // Process files sequentially to prevent main-thread congestion and memory spikes
     const runInQueue = async (files: File[], limit: number): Promise<QueueItem[]> => {
       const results = new Array<QueueItem | null>(files.length).fill(null);
       let index = 0;
+
       const worker = async () => {
         while (index < files.length) {
           const currentIndex = index++;
-          results[currentIndex] = await processFile(files[currentIndex]);
+          const file = files[currentIndex];
+          const res = await processFile(file);
+          results[currentIndex] = res;
+          // Small breathing room for GC
           await new Promise(r => setTimeout(r, 100));
         }
       };
+
       const workers = Array(Math.min(limit, files.length)).fill(null).map(worker);
       await Promise.all(workers);
       return results.filter((item): item is QueueItem => item !== null);
@@ -586,24 +824,17 @@ const processIncomingFiles = async (rawFiles: File[]) => {
         setProcessingQueue(results.slice(1));
         setAppState('crop');
       } else {
-        alert("Could not process the files. Please try again.");
+        alert("Could not process the image. Please try again or use a different photo.");
       }
     } catch (err) {
       console.error("Error processing captured batch:", err);
-      alert("Error processing the files.");
+      alert("Error processing the image.");
     } finally {
       setIsProcessingBatch(false);
     }
   };
 
-  const handleCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const inputElement = e.target;
-    const files = Array.from(inputElement.files || []) as File[];
-    await processIncomingFiles(files);
-    inputElement.value = '';
-  };
-
-const handleCropNext = async (corners: Point[]) => {
+  const handleCropNext = async (corners: Point[]) => {
     try {
       if (!capturedImage) return;
       setIsProcessingStep(true);
@@ -657,6 +888,7 @@ const handleCropNext = async (corners: Point[]) => {
       
       // Save to database
       await saveDocument(updatedDoc);
+      triggerHapticSuccess();
       
       // Refresh documents from store to ensure consistency
       const freshDocs = await getDocuments();
@@ -702,7 +934,30 @@ const handleCropNext = async (corners: Point[]) => {
     }
   };
 
-  const downloadFile = (blob: Blob, filename: string) => {
+  const downloadFile = async (blob: Blob, filename: string) => {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const base64Data = await blobToBase64(blob);
+        const savedFile = await Filesystem.writeFile({
+          path: filename,
+          data: base64Data,
+          directory: Directory.Documents,
+        });
+        
+        showCustomAlert(`File saved to Documents: ${filename}`);
+        
+        // Optionally offer to share it immediately since Android users expect that
+        await Share.share({
+          title: filename,
+          url: savedFile.uri,
+        });
+      } catch (err) {
+        console.error("Native save failed", err);
+        showCustomAlert("Failed to save file natively.");
+      }
+      return;
+    }
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -725,36 +980,44 @@ const handleCropNext = async (corners: Point[]) => {
 
   const handleSaveAsPDF = async (doc: Document) => {
     try {
-      const blob = await generatePDF(doc, { drawBorder: addPdfBorder });
-      
-      // On mobile, navigator.share is much more reliable than <a> download
-      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-      const file = new File([blob], `${doc.title}.pdf`, { type: 'application/pdf' });
-      
-      if (isMobile && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-        try {
-          await navigator.share({
-            files: [file],
-            title: doc.title,
-          });
-          return;
-        } catch (shareErr) {
-          console.warn("Share failed, falling back to download", shareErr);
-        }
-      }
-
-      downloadFile(blob, `${doc.title}.pdf`);
+      const blob = await generatePDF(doc, { 
+        drawBorder: addPdfBorder,
+        onProgress: (current, total) => setPdfExportProgress({ current, total })
+      });
+      await downloadFile(blob, `${doc.title}.pdf`);
     } catch (e) {
       console.error("Failed to generate PDF", e);
       setErrorMessage("Could not generate PDF. Please try again.");
+    } finally {
+      setPdfExportProgress(null);
     }
   };
 
   const handleSharePDF = async (doc: Document) => {
     try {
-      const blob = await generatePDF(doc, { drawBorder: addPdfBorder });
+      const blob = await generatePDF(doc, { 
+        drawBorder: addPdfBorder,
+        onProgress: (current, total) => setPdfExportProgress({ current, total })
+      });
+      
+      if (Capacitor.isNativePlatform()) {
+        const base64Data = await blobToBase64(blob);
+        const filename = `${doc.title.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+        const savedFile = await Filesystem.writeFile({
+          path: filename,
+          data: base64Data,
+          directory: Directory.Cache, // Use Cache for temporary sharing
+        });
+        
+        await Share.share({
+          title: doc.title,
+          url: savedFile.uri,
+        });
+        return;
+      }
+
       const file = new File([blob], `${doc.title}.pdf`, { type: 'application/pdf' });
-      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
           title: doc.title,
@@ -767,6 +1030,8 @@ const handleCropNext = async (corners: Point[]) => {
       if (e.name !== 'AbortError') {
         console.error("Failed to share PDF", e);
       }
+    } finally {
+      setPdfExportProgress(null);
     }
   };
 
@@ -795,12 +1060,14 @@ const handleCropNext = async (corners: Point[]) => {
       if (doc.isTrash) {
         const confirmDelete = await showCustomConfirm(`Are you sure you want to permanently delete "${doc.title}"? This action cannot be undone.`);
         if (!confirmDelete) return;
+        triggerHapticMedium();
         await deleteDocument(id);
         setDocuments(prev => prev.filter(d => d.id !== id));
       } else {
         const confirmTrash = await showCustomConfirm(`Move "${doc.title}" to Trash?`);
         if (!confirmTrash) return;
-        const updatedDoc = { ...doc, isTrash: true, trashedAt: Date.now() };
+        triggerHapticMedium();
+        const updatedDoc = { ...doc, isTrash: true };
         await saveDocument(updatedDoc);
         setDocuments(prev => prev.map(d => d.id === id ? updatedDoc : d));
       }
@@ -824,6 +1091,7 @@ const handleCropNext = async (corners: Point[]) => {
 
     const confirmDeletePage = await showCustomConfirm(`Are you sure you want to delete Page ${pageIndex + 1}?`);
     if (confirmDeletePage) {
+      triggerHapticMedium();
       const updatedPages = [...doc.pages];
       updatedPages.splice(pageIndex, 1);
       const updatedDoc = { ...doc, pages: updatedPages };
@@ -937,6 +1205,46 @@ const handleCropNext = async (corners: Point[]) => {
     setActiveMenuDocId(null);
   };
 
+  const shareFiles = async (files: File[], title: string, text?: string) => {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const uris: string[] = [];
+        for (const file of files) {
+          const base64Data = await blobToBase64(file);
+          const savedFile = await Filesystem.writeFile({
+            path: file.name,
+            data: base64Data,
+            directory: Directory.Cache,
+          });
+          uris.push(savedFile.uri);
+        }
+        await Share.share({
+          title,
+          text,
+          files: uris,
+        });
+        return true;
+      } catch (err) {
+        console.error("Native share failed", err);
+        return false;
+      }
+    }
+
+    if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
+      try {
+        await navigator.share({
+          files,
+          title,
+          text,
+        });
+        return true;
+      } catch (err) {
+        console.warn("Navigator share failed", err);
+      }
+    }
+    return false;
+  };
+
   const executeExport = async (action: 'save' | 'share' | 'email') => {
     const doc = documents.find(d => d.id === showExportModalFor);
     if (!doc) return;
@@ -958,67 +1266,44 @@ const handleCropNext = async (corners: Point[]) => {
           drawBorder: addPdfBorder, 
           quality: exportQuality, 
           password: exportPassword || undefined,
-          watermark: watermarkConfig
+          watermark: watermarkConfig,
+          onProgress: (current, total) => setPdfExportProgress({ current, total })
         });
         
-        const file = new File([blob], `${doc.title}.pdf`, { type: 'application/pdf' });
+        const filename = `${doc.title.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+        const file = new File([blob], filename, { type: 'application/pdf' });
         
         if (action === 'save') {
-          downloadFile(blob, `${doc.title}.pdf`);
-        } else if (action === 'email') {
-          // Check if we can share with files (preferred for attachments)
-          if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-            try {
-              await navigator.share({
-                files: [file],
-                title: doc.title,
-                text: `Please find attached the scanned PDF document "${doc.title}".`
-              });
-              setAppState('home');
-              setShowExportModalFor(null);
-              return;
-            } catch (shareErr) {
-              console.warn("Share via email failed, falling back:", shareErr);
-            }
-          }
-
-          // Fallback to mailto + download
-          const subject = encodeURIComponent(`Scanned Document: ${doc.title}`);
-          const body = encodeURIComponent(`I have scanned a document for you: "${doc.title}".\n\nNote: The PDF has been downloaded to my device because standard email links don't support attachments directly. I am attaching it manually now.\n\nSent from Mobile PDF Scanner & Creator.`);
-          window.location.href = `mailto:?subject=${subject}&body=${body}`;
-
-          // Also download for easy attachment
-          downloadFile(blob, `${doc.title}.pdf`);
+          await downloadFile(blob, filename);
+        } else if (action === 'email' || action === 'share') {
+          const success = await shareFiles([file], doc.title, action === 'email' ? `Please find attached the scanned PDF document "${doc.title}".` : undefined);
           
-          showCustomAlert("Email App Opened: Standard email links cannot attach files automatically. The PDF has been downloaded to your device so you can attach it to the email manually.");
-        } else {
-          try {
-            if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-              await navigator.share({
-                files: [file],
-                title: doc.title,
-              });
+          if (success) {
+            setAppState('home');
+            setShowExportModalFor(null);
+          } else {
+            // Fallback for sharing
+            if (action === 'email') {
+              const subject = encodeURIComponent(`Scanned Document: ${doc.title}`);
+              const body = encodeURIComponent(`I have scanned a document for you: "${doc.title}".\n\nNote: The PDF has been downloaded to my device because standard email links don't support attachments directly. I am attaching it manually now.\n\nSent from Mobile PDF Scanner & Creator.`);
+              window.location.href = `mailto:?subject=${subject}&body=${body}`;
+              await downloadFile(blob, filename);
+              showCustomAlert("Email opened. PDF saved to Downloads—please attach it manually.");
             } else {
-              throw new Error("unsupported");
+              await downloadFile(blob, filename);
+              await showCustomAlert("Sharing failed. PDF saved to device—please share it manually.");
             }
-          } catch (shareErr) {
-            // fallback
-            downloadFile(blob, `${doc.title}.pdf`);
-            await showCustomAlert("System sharing is not fully supported in this browser. The PDF has been downloaded to your device instead.");
           }
         }
       } catch (e) {
         console.error("Export failed", e);
+      } finally {
+        setPdfExportProgress(null);
       }
     } else if (exportFormat === 'images') {
       if (action === 'save') {
         await handleDownloadImages(doc, watermarkConfig);
-      } else if (action === 'email') {
-        const subject = encodeURIComponent(`Scanned Images: ${doc.title}`);
-        const body = encodeURIComponent(`Please find attached the images from scanned document "${doc.title}".\n\nSent from Mobile PDF Scanner & Creator.`);
-        window.location.href = `mailto:?subject=${subject}&body=${body}`;
-        await handleDownloadImages(doc, watermarkConfig);
-      } else {
+      } else if (action === 'email' || action === 'share') {
         try {
           const files = await Promise.all(doc.pages.map(async (page, i) => {
             let src = page.filteredImage;
@@ -1027,17 +1312,21 @@ const handleCropNext = async (corners: Point[]) => {
             }
             const res = await fetch(src);
             const blob = await res.blob();
-            return new File([blob], `${doc.title}_Page_${i + 1}.jpg`, { type: 'image/jpeg' });
+            return new File([blob], `${doc.title.replace(/[^a-z0-9]/gi, '_')}_Page_${i + 1}.jpg`, { type: 'image/jpeg' });
           }));
-          try {
-            if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
-              await navigator.share({ files, title: doc.title });
+
+          const success = await shareFiles(files, doc.title, action === 'email' ? `Please find attached the images from scanned document "${doc.title}".` : undefined);
+          
+          if (!success) {
+            if (action === 'email') {
+              const subject = encodeURIComponent(`Scanned Images: ${doc.title}`);
+              const body = encodeURIComponent(`Please find attached the images from scanned document "${doc.title}".\n\nSent from Mobile PDF Scanner & Creator.`);
+              window.location.href = `mailto:?subject=${subject}&body=${body}`;
+              await handleDownloadImages(doc, watermarkConfig);
             } else {
-              throw new Error("unsupported");
+              await handleDownloadImages(doc, watermarkConfig);
+              await showCustomAlert("Images saved to device. Please select them when sharing.");
             }
-          } catch (shareErr) {
-            await handleDownloadImages(doc, watermarkConfig);
-            await showCustomAlert("System sharing is not fully supported in this browser. The images have been downloaded to your device instead.");
           }
         } catch (e) {
           console.error("Failed to share images", e);
@@ -1046,12 +1335,7 @@ const handleCropNext = async (corners: Point[]) => {
     } else if (exportFormat === 'zip') {
       if (action === 'save') {
         await handleDownloadZip(doc, watermarkConfig);
-      } else if (action === 'email') {
-        const subject = encodeURIComponent(`ZIP Archive: ${doc.title}`);
-        const body = encodeURIComponent(`Please find attached the ZIP archive containing scanned images of "${doc.title}".\n\nSent from Mobile PDF Scanner & Creator.`);
-        window.location.href = `mailto:?subject=${subject}&body=${body}`;
-        await handleDownloadZip(doc, watermarkConfig);
-      } else {
+      } else if (action === 'email' || action === 'share') {
         try {
           const zip = new JSZip();
           for (let i = 0; i < doc.pages.length; i++) {
@@ -1062,21 +1346,28 @@ const handleCropNext = async (corners: Point[]) => {
             }
             const res = await fetch(src);
             const blob = await res.blob();
-            zip.file(`${doc.title}_Page_${i + 1}.jpg`, blob);
+            zip.file(`${doc.title.replace(/[^a-z0-9]/gi, '_')}_Page_${i + 1}.jpg`, blob);
           }
           const zipBlob = await zip.generateAsync({ type: 'blob' });
-          const file = new File([zipBlob], `${doc.title}.zip`, { type: 'application/zip' });
-          try {
-            if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-              await navigator.share({ files: [file], title: doc.title });
+          const filename = `${doc.title.replace(/[^a-z0-9]/gi, '_')}.zip`;
+          const file = new File([zipBlob], filename, { type: 'application/zip' });
+          
+          const success = await shareFiles([file], doc.title, action === 'email' ? `Please find attached the ZIP archive containing scanned images of "${doc.title}".` : undefined);
+          
+          if (!success) {
+            if (action === 'email') {
+              const subject = encodeURIComponent(`ZIP Archive: ${doc.title}`);
+              const body = encodeURIComponent(`Please find attached the ZIP archive containing scanned images of "${doc.title}".\n\nSent from Mobile PDF Scanner & Creator.`);
+              window.location.href = `mailto:?subject=${subject}&body=${body}`;
+              await handleDownloadZip(doc, watermarkConfig);
             } else {
-              throw new Error("unsupported");
+              await handleDownloadZip(doc, watermarkConfig);
+              await showCustomAlert("ZIP file saved to device. Please select it when sharing.");
             }
-          } catch (shareErr) {
-            await handleDownloadZip(doc, watermarkConfig);
-            await showCustomAlert("System sharing is not fully supported in this browser. The ZIP file has been downloaded to your device instead.");
           }
-        } catch(e) {}
+        } catch(e) {
+          console.error("ZIP share failed", e);
+        }
       }
     }
     setShowExportModalFor(null);
@@ -1167,7 +1458,7 @@ const handleCropNext = async (corners: Point[]) => {
     } else {
       const confirmTrash = await showCustomConfirm(`Move ${docsToProcess.length} selected documents to Trash?`);
       if (!confirmTrash) return;
-      await Promise.all(docsToProcess.map(d => saveDocument({ ...d, isTrash: true, trashedAt: Date.now() })));
+      await Promise.all(docsToProcess.map(d => saveDocument({ ...d, isTrash: true })));
     }
 
     const freshDocs = await getDocuments();
@@ -1180,13 +1471,22 @@ const handleCropNext = async (corners: Point[]) => {
     try {
        const docsToShare = documents.filter(d => selectedDocs.has(d.id));
        if (docsToShare.length === 0) return;
-       const files = await Promise.all(docsToShare.map(async doc => {
-         const blob = await generatePDF(doc, { drawBorder: addPdfBorder });
-         return new File([blob], `${doc.title}.pdf`, { type: 'application/pdf' });
-       }));
+       
+       const totalPages = docsToShare.reduce((sum, doc) => sum + doc.pages.length, 0);
+       let pagesDone = 0;
+       
+       const files = [];
+       for (const doc of docsToShare) {
+         const blob = await generatePDF(doc, { 
+           drawBorder: addPdfBorder,
+           onProgress: (current) => setPdfExportProgress({ current: pagesDone + current, total: totalPages })
+         });
+         pagesDone += doc.pages.length;
+         files.push(new File([blob], `${doc.title}.pdf`, { type: 'application/pdf' }));
+       }
        
        try {
-          if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
+          if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files })) {
              await navigator.share({
                 files,
                 title: "Shared Documents",
@@ -1195,52 +1495,28 @@ const handleCropNext = async (corners: Point[]) => {
              throw new Error("unsupported");
           }
        } catch (shareErr) {
+          pagesDone = 0;
           for (const doc of docsToShare) {
-             const blob = await generatePDF(doc, { drawBorder: addPdfBorder });
+             const blob = await generatePDF(doc, { 
+               drawBorder: addPdfBorder,
+               onProgress: (current) => setPdfExportProgress({ current: pagesDone + current, total: totalPages })
+             });
+             pagesDone += doc.pages.length;
              downloadFile(blob, `${doc.title}.pdf`);
           }
-          await showCustomAlert("System sharing is not fully supported in this browser. The PDFs have been downloaded to your device instead.");
+          await showCustomAlert("PDFs saved to Downloads. Please select them when sharing.");
        }
     } catch (e: any) {
        if (e.name !== 'AbortError') {
          console.error(e);
          await showCustomAlert("Failed to share: " + e.message);
        }
+    } finally {
+       setPdfExportProgress(null);
     }
   };
 
-  
-  const handleDownloadCombinedPDF = async () => {
-    const docsToMerge = documents.filter(d => selectedDocs.has(d.id));
-    if (docsToMerge.length === 0) return;
-    
-    docsToMerge.sort((a, b) => a.createdAt - b.createdAt);
-    const allPages = docsToMerge.flatMap(d => d.pages);
-    
-    if (allPages.length === 0) {
-      setErrorMessage("No pages to export.");
-      return;
-    }
-    
-    const combinedDoc = {
-      id: "combined-temp",
-      title: `Combined PDF ${new Date().toLocaleDateString()}`,
-      createdAt: Date.now(),
-      pages: allPages
-    };
-    
-    try {
-      const blob = await generatePDF(combinedDoc, { drawBorder: addPdfBorder });
-      downloadFile(blob, `Combined_PDF_${new Date().getTime()}.pdf`);
-      setIsMultiSelect(false);
-      setSelectedDocs(new Set());
-    } catch (e) {
-      console.error("Failed to generate combined PDF", e);
-      setErrorMessage("Could not generate combined PDF.");
-    }
-  };
-
-const handleMergeSelected = async () => {
+  const handleMergeSelected = async () => {
     const docsToMerge = documents.filter(d => selectedDocs.has(d.id));
     if (docsToMerge.length < 2) return;
     
@@ -1272,7 +1548,7 @@ const handleMergeSelected = async () => {
       }));
 
       try {
-        if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
+        if (!isAndroidWebView() && navigator.share && navigator.canShare && navigator.canShare({ files })) {
           await navigator.share({
             files,
             title: doc.title,
@@ -1282,7 +1558,7 @@ const handleMergeSelected = async () => {
         }
       } catch (shareErr) {
         await handleDownloadImages(doc);
-        await showCustomAlert("System sharing is not fully supported in this browser. The images have been downloaded to your device instead.");
+        await showCustomAlert("Images saved to Downloads. Please select them when sharing.");
       }
     } catch (e: any) {
       if (e.name !== 'AbortError') {
@@ -1311,6 +1587,28 @@ const handleMergeSelected = async () => {
     setSelectedDocs(new Set());
     setIsMultiSelect(false);
     setShowMultiFolderSelect(false);
+  };
+
+  const renderPdfProgressModal = () => {
+    if (!pdfExportProgress) return null;
+    const progress = Math.round((pdfExportProgress.current / Math.max(1, pdfExportProgress.total)) * 100);
+    return (
+      <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className={`w-full max-w-sm rounded-2xl p-6 flex flex-col items-center justify-center ${theme === 'dark' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white text-gray-900 border-gray-100'} shadow-2xl border`}>
+          <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-6"></div>
+          <h3 className="font-bold text-lg mb-2">Generating PDF...</h3>
+          <p className={`text-sm mb-4 ${theme === 'dark' ? 'text-slate-400' : 'text-gray-500'}`}>
+            Processing page {pdfExportProgress.current} of {pdfExportProgress.total}
+          </p>
+          <div className={`w-full h-2 rounded-full overflow-hidden ${theme === 'dark' ? 'bg-slate-800' : 'bg-gray-100'}`}>
+            <div 
+              className="h-full bg-blue-600 rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        </div>
+      </div>
+    );
   };
 
   const renderExportModal = () => {
@@ -1652,6 +1950,34 @@ const handleMergeSelected = async () => {
     );
   };
 
+  if (showCustomCamera) {
+    return (
+      <CameraView
+        initialMode={cameraMode}
+        onCapture={(files) => {
+          setShowCustomCamera(false);
+          handleFilesSelected(files);
+        }}
+        onClose={() => setShowCustomCamera(false)}
+        onPickGallery={() => {
+          if (cameraMode === "single") {
+            fileInputGalleryRef.current?.click();
+          } else {
+            fileInputGalleryRef2.current?.click();
+          }
+        }}
+        onFallback={() => {
+          setShowCustomCamera(false);
+          if (cameraMode === "single") {
+            fileInputCameraRef.current?.click();
+          } else {
+            fileInputCameraRef2.current?.click();
+          }
+        }}
+      />
+    );
+  }
+
   if (appState === 'crop' && capturedImage) {
     return (
       <CropView
@@ -1674,55 +2000,11 @@ const handleMergeSelected = async () => {
   const renderFullScreenImageOverlay = () => {
     if (!fullScreenImage) return null;
     return (
-      <div className="fixed inset-0 bg-black/95 z-[100] flex flex-col animate-in fade-in duration-200">
-         <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center z-[110] bg-gradient-to-b from-black/60 to-transparent">
-           <div className="flex items-center space-x-2">
-             <button 
-               onClick={() => setFullScreenScale(prev => Math.max(1, prev - 0.5))}
-               className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
-               title="Zoom Out"
-             >
-               <ZoomOut className="w-5 h-5" />
-             </button>
-             <span className="text-white/60 text-xs font-mono w-12 text-center">{Math.round(fullScreenScale * 100)}%</span>
-             <button 
-               onClick={() => setFullScreenScale(prev => Math.min(4, prev + 0.5))}
-               className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
-               title="Zoom In"
-             >
-               <ZoomIn className="w-5 h-5" />
-             </button>
-           </div>
-           <button 
-             onClick={() => { setFullScreenImage(null); setFullScreenScale(1); }} 
-             className="p-2 text-white/70 hover:text-white bg-black/40 hover:bg-black/60 rounded-full transition-colors"
-             title="Close"
-           >
-             <X className="w-6 h-6" />
-           </button>
-         </div>
-         
-          <div className="flex-1 overflow-auto p-4 touch-auto">
-            <div 
-              className="transition-all duration-200 ease-out flex items-center justify-center min-h-full min-w-full"
-              style={{ 
-                width: fullScreenScale > 1 ? `${fullScreenScale * 100}%` : "100%",
-                height: fullScreenScale > 1 ? `${fullScreenScale * 100}%` : "100%",
-              }}
-            >
-              <img 
-                src={fullScreenImage} 
-                alt="Fullscreen preview" 
-                style={{ 
-                  maxWidth: fullScreenScale > 1 ? "none" : "95vw",
-                  maxHeight: fullScreenScale > 1 ? "none" : "90vh",
-                }} 
-                className={`object-contain drop-shadow-2xl transition-all duration-200 ${addPdfBorder ? "border-[4px] border-black ring-2 ring-white/15" : ""}`} 
-                draggable={false}
-              />
-            </div>
-          </div>
-      </div>
+      <ZoomableImage 
+        src={fullScreenImage} 
+        onClose={() => setFullScreenImage(null)} 
+        addPdfBorder={addPdfBorder} 
+      />
     );
   };
 
@@ -1740,8 +2022,8 @@ const handleMergeSelected = async () => {
   if (appState === 'view_doc' && currentDoc) {
     return (
       <div className={`flex flex-col h-[100dvh] font-sans transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-950 text-white' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)]'}`}>
-         <div className={`flex items-center justify-between p-4 border-b sticky top-0 z-10 shadow-sm transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-[var(--color-warm-card)] border-[var(--color-warm-border)]'}`}>
-            <button onClick={() => { setCurrentDoc(null); setAppState('home'); setIsEditingTitle(false); }} className={`p-2 -ml-2 flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-text)]'}`}>
+         <div className={`flex items-center justify-between px-4 pb-3 safe-pt border-b sticky top-0 z-10 shadow-sm transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-[var(--color-warm-card)] border-[var(--color-warm-border)]'}`}>
+            <button onClick={() => { setCurrentDoc(null); setAppState('home'); setIsEditingTitle(false); }} className={`touch-target p-2 -ml-2 flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-text)]'}`}>
                <ArrowLeft className="w-6 h-6" />
             </button>
             
@@ -1758,10 +2040,10 @@ const handleMergeSelected = async () => {
                   className={`flex-1 border rounded-lg px-2.5 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium ${theme === 'dark' ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-[var(--color-warm-accent)]'}`}
                   autoFocus
                 />
-                <button onClick={handleRenameSave} className={`p-1.5 rounded-lg flex-shrink-0 ${theme === 'dark' ? 'text-green-400 hover:bg-slate-800' : 'text-green-600 hover:bg-green-50'}`} title="Save Title">
+                <button onClick={handleRenameSave} className={`touch-target p-1.5 rounded-lg flex-shrink-0 ${theme === 'dark' ? 'text-green-400 hover:bg-slate-800' : 'text-green-600 hover:bg-green-50'}`} title="Save Title">
                   <Check className="w-5 h-5" />
                 </button>
-                <button onClick={() => setIsEditingTitle(false)} className={`p-1.5 rounded-lg flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-400 hover:bg-gray-100'}`} title="Cancel">
+                <button onClick={() => setIsEditingTitle(false)} className={`touch-target p-1.5 rounded-lg flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-400 hover:bg-gray-100'}`} title="Cancel">
                   <X className="w-5 h-5" />
                 </button>
               </div>
@@ -1770,7 +2052,7 @@ const handleMergeSelected = async () => {
                 <h1 className={`text-lg font-semibold truncate ${theme === 'dark' ? 'text-slate-200' : 'text-[var(--color-warm-text)]'}`}>{currentDoc.title}</h1>
                 <button 
                   onClick={() => { setTempTitle(currentDoc.title); setIsEditingTitle(true); }} 
-                  className={`p-1.5 ml-1 rounded-lg transition-colors flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:text-blue-400 hover:bg-slate-800' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-accent)] hover:bg-[var(--color-warm-border)]'}`}
+                  className={`touch-target p-1.5 ml-1 rounded-lg transition-colors flex-shrink-0 ${theme === 'dark' ? 'text-slate-400 hover:text-blue-400 hover:bg-slate-800' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-accent)] hover:bg-[var(--color-warm-border)]'}`}
                   title="Rename document"
                 >
                   <Pencil className="w-4 h-4" />
@@ -1907,7 +2189,7 @@ const handleMergeSelected = async () => {
                 </div>
                 <div className={`p-4 flex justify-center ${theme === 'dark' ? 'bg-slate-950/50' : 'bg-[var(--color-warm-bg)]'}`}>
                   <button onClick={() => setFullScreenImage(page.filteredImage)} className="cursor-zoom-in transition-transform hover:scale-[1.02]">
-                    <img src={page.filteredImage} alt={`Page ${idx+1}`} draggable={false} className={`max-h-[60vh] object-contain shadow-md select-none transition-all duration-150 ${addPdfBorder ? 'border-[3px] border-black rounded-none ring-2 ring-black/10' : 'rounded-md'}`} />
+                    <img src={page.filteredImage} alt={`Page ${idx+1}`} draggable={false} loading="lazy" decoding="async" className={`max-h-[60vh] object-contain shadow-md select-none transition-all duration-150 ${addPdfBorder ? 'border-[3px] border-black rounded-none ring-2 ring-black/10' : 'rounded-md'}`} />
                   </button>
                 </div>
              </div>
@@ -1917,7 +2199,7 @@ const handleMergeSelected = async () => {
           <div className={`p-4 border-t ${theme === "dark" ? "bg-slate-900 border-slate-800" : "bg-[var(--color-warm-card)] border-[var(--color-warm-border)]"}`}>
             <div className="flex items-center justify-center space-x-3 w-full">
               <button 
-                onClick={() => fileInputCameraRef2.current?.click()}
+                onClick={() => { triggerHapticLight('scan'); setCameraMode("batch"); setShowCustomCamera(true); }}
                 className="flex-1 flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-xl shadow-lg transition-all active:scale-95"
               >
                 <Camera className="w-5 h-5" />
@@ -1934,7 +2216,7 @@ const handleMergeSelected = async () => {
           </div>
          <input 
             type="file" 
-            accept="image/*,application/pdf"
+            accept="image/*"
             multiple
             className="hidden" 
             ref={fileInputGalleryRef2}
@@ -1942,13 +2224,14 @@ const handleMergeSelected = async () => {
          />
          <input 
             type="file" 
-            accept="image/*,application/pdf"
+            accept="image/*"
             capture="environment" 
             className="hidden" 
             ref={fileInputCameraRef2}
             onChange={handleCapture}
          />
          {renderExportModal()}
+         {renderPdfProgressModal()}
           {renderBatchProgressOverlay()}
           {renderCustomDialogs()}
           {renderFullScreenImageOverlay()}
@@ -1967,12 +2250,12 @@ const handleMergeSelected = async () => {
       <div className="space-y-6">
         {/* Search bar inside notes */}
         <div className="relative">
-          <Search className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             placeholder="Search notes..."
             value={noteSearchQuery || ''}
-            className={`w-full border pl-10 pr-4 py-2.5 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-white placeholder-slate-400' : 'bg-white border-gray-200'}`}
+            className={`w-full border pl-9 pr-4 py-1 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-white placeholder-slate-400' : 'bg-white border-gray-200 text-gray-800'}`}
             onChange={(e) => setNoteSearchQuery(e.target.value)}
           />
         </div>
@@ -2138,26 +2421,152 @@ const handleMergeSelected = async () => {
     const totalPages = documents.reduce((sum, d) => sum + d.pages.length, 0);
     const storageEst = (JSON.stringify(documents).length / 1024).toFixed(1);
 
+    const initials = profileName
+      .trim()
+      .split(/\s+/)
+      .map(n => n[0])
+      .join('')
+      .slice(0, 2)
+      .toUpperCase() || 'GR';
+
+    const handleStartEdit = () => {
+      setEditName(profileName);
+      setEditEmail(profileEmail);
+      setEditTier(profileTier);
+      setEditAvatarColor(profileAvatarColor);
+      setIsEditingProfile(true);
+    };
+
+    const handleSaveProfile = () => {
+      if (editName.trim()) setProfileName(editName.trim());
+      if (editEmail.trim()) setProfileEmail(editEmail.trim());
+      setProfileTier(editTier);
+      setProfileAvatarColor(editAvatarColor);
+      setIsEditingProfile(false);
+    };
+
+    const avatarGradients = [
+      { name: 'Classic Indigo', class: 'from-blue-500 to-indigo-600' },
+      { name: 'Emerald Wave', class: 'from-emerald-500 to-teal-600' },
+      { name: 'Sunset Rose', class: 'from-rose-500 to-red-600' },
+      { name: 'Golden Amber', class: 'from-amber-500 to-orange-600' },
+      { name: 'Royal Velvet', class: 'from-purple-500 to-pink-600' },
+      { name: 'Dark Slate', class: 'from-slate-700 to-slate-900' },
+    ];
+
     return (
       <div className="space-y-6">
         {/* User Card */}
-        <div className="bg-gradient-to-br from-[#1b2536] to-[#0f172a] rounded-2xl p-6 text-white shadow-lg relative overflow-hidden flex flex-col sm:flex-row items-center sm:items-start space-y-4 sm:space-y-0 sm:space-x-5">
+        <div className="bg-gradient-to-br from-[#1b2536] to-[#0f172a] rounded-2xl p-6 text-white shadow-lg relative overflow-hidden transition-all duration-300">
           <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-full blur-2xl -mr-10 -mt-10" />
           
-          <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 flex items-center justify-center font-bold text-xl text-white shadow-md border-2 border-white/20">
-            GP
-          </div>
+          {!isEditingProfile ? (
+            <div className="relative z-10 flex flex-col sm:flex-row items-center sm:items-start text-center sm:text-left space-y-4 sm:space-y-0 sm:space-x-5">
+              <div className={`w-16 h-16 rounded-full bg-gradient-to-tr ${profileAvatarColor} flex items-center justify-center font-black text-xl text-white shadow-md border-2 border-white/20 uppercase transition-all duration-300`}>
+                {initials}
+              </div>
 
-          <div className="flex-1 text-center sm:text-left space-y-1">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:space-x-2.5 justify-center sm:justify-start">
-              <h2 className="text-xl font-bold">Image PDF Scanner</h2>
-              <span className="inline-block mt-1 sm:mt-0 px-2 py-0.5 bg-amber-400 text-amber-950 text-[10px] font-extrabold tracking-wider rounded-md uppercase">
-                PRO ACTIVE
-              </span>
+              <div className="flex-1 space-y-1">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:space-x-2.5 justify-center sm:justify-start">
+                  <h2 className="text-xl font-bold tracking-tight">{profileName}</h2>
+                  <span className="inline-block mt-1 sm:mt-0 px-2 py-0.5 bg-amber-400 text-amber-950 text-[10px] font-extrabold tracking-wider rounded-md uppercase self-center sm:self-auto">
+                    {profileTier}
+                  </span>
+                </div>
+                <p className="text-sm text-slate-300 font-mono">{profileEmail}</p>
+                <p className="text-xs text-slate-400">Premium active tier. Unlimited OCR & PDF Generation.</p>
+                
+                <div className="pt-3 flex justify-center sm:justify-start">
+                  <button
+                    onClick={handleStartEdit}
+                    className="touch-target inline-flex items-center space-x-1.5 px-3 py-1 bg-white/10 hover:bg-white/20 active:bg-white/30 border border-white/15 text-xs font-semibold rounded-full text-white transition-all shadow-xs cursor-pointer"
+                  >
+                    <Pencil className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Edit Profile</span>
+                  </button>
+                </div>
+              </div>
             </div>
-            <p className="text-sm text-slate-300">gr7imagepdf@gmail.com</p>
-            <p className="text-xs text-slate-400">Premium active tier. Unlimited OCR & PDF Generation.</p>
-          </div>
+          ) : (
+            <div className="relative z-10 space-y-4 text-left">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                <h3 className="text-sm font-extrabold uppercase tracking-widest text-slate-400">Edit Profile Details</h3>
+                <span className="text-[10px] font-bold text-slate-500 uppercase">Interactive Setup</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Name */}
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-extrabold tracking-wider uppercase text-slate-400">Scanner Name</label>
+                  <input
+                    type="text"
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    placeholder="Enter your name"
+                    className="w-full bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-xl px-3 py-2 text-sm text-white focus:outline-none transition-all"
+                  />
+                </div>
+
+                {/* Email */}
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-extrabold tracking-wider uppercase text-slate-400">Email Address</label>
+                  <input
+                    type="email"
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    placeholder="Enter your email"
+                    className="w-full bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-xl px-3 py-2 text-sm text-white focus:outline-none transition-all"
+                  />
+                </div>
+
+                {/* Account Tier */}
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-extrabold tracking-wider uppercase text-slate-400">Account Tier</label>
+                  <select
+                    value={editTier}
+                    onChange={(e) => setEditTier(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 focus:border-blue-500 rounded-xl px-3 py-2 text-sm text-white focus:outline-none transition-all"
+                  >
+                    <option value="PRO ACTIVE">PRO ACTIVE</option>
+                    <option value="ENTERPRISE VIP">ENTERPRISE VIP</option>
+                    <option value="CREATOR PASS">CREATOR PASS</option>
+                    <option value="FREE TIER">FREE TIER</option>
+                  </select>
+                </div>
+
+                {/* Theme / Color Scheme */}
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-extrabold tracking-wider uppercase text-slate-400">Avatar Accent</label>
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {avatarGradients.map((g) => (
+                      <button
+                        key={g.class}
+                        onClick={() => setEditAvatarColor(g.class)}
+                        title={g.name}
+                        className={`w-6 h-6 rounded-full bg-gradient-to-tr ${g.class} border-2 transition-all cursor-pointer ${editAvatarColor === g.class ? 'border-white scale-120 ring-2 ring-blue-500/50' : 'border-transparent hover:scale-110'}`}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-3 flex items-center justify-end space-x-2.5 border-t border-slate-800 mt-2">
+                <button
+                  onClick={() => setIsEditingProfile(false)}
+                  className="touch-target px-4 py-1.5 text-xs font-semibold rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 transition-all cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveProfile}
+                  className="touch-target px-5 py-1.5 text-xs font-semibold rounded-full bg-blue-600 hover:bg-blue-500 text-white transition-all shadow-md shadow-blue-900/20 flex items-center space-x-1 cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Save Changes</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Bento Stats Grid */}
@@ -2222,13 +2631,13 @@ const handleMergeSelected = async () => {
             <div className={`flex rounded-lg p-1 ${theme === 'dark' ? 'bg-slate-950' : 'bg-gray-100'}`}>
               <button 
                 onClick={() => setLayout('grid')} 
-                className={`p-1.5 rounded-md text-xs font-bold transition-all ${layout === 'grid' ? theme === 'dark' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}
+                className={`touch-target p-1.5 rounded-md text-xs font-bold transition-all ${layout === 'grid' ? theme === 'dark' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}
               >
                 Grid
               </button>
               <button 
                 onClick={() => setLayout('list')} 
-                className={`p-1.5 rounded-md text-xs font-bold transition-all ${layout === 'list' ? theme === 'dark' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}
+                className={`touch-target p-1.5 rounded-md text-xs font-bold transition-all ${layout === 'list' ? theme === 'dark' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}
               >
                 List
               </button>
@@ -2266,27 +2675,24 @@ const handleMergeSelected = async () => {
               <div className={`w-11 h-6 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:border after:rounded-full after:h-5 after:w-5 after:transition-all ${theme === 'dark' ? 'bg-slate-800 border-slate-700 after:bg-white after:border-slate-600 peer-checked:bg-blue-600' : 'bg-gray-200 after:bg-white after:border-gray-300 peer-checked:bg-blue-600'}`}></div>
             </label>
           </div>
-        </div>
-
-        <div className={`rounded-2xl border p-5 shadow-xs space-y-4 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-gray-100 text-gray-900'}`}>
-          <h3 className={`font-bold text-sm ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>Preferences</h3>
-          
-          <div className={`flex items-center justify-between py-2`}>
-            <div>
-              <p className={`text-sm font-semibold ${theme === 'dark' ? 'text-slate-200' : 'text-gray-800'}`}>Trash Auto-Cleanup</p>
-              <p className={`text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-gray-400'}`}>Automatically empty trash.</p>
+          <div className="pt-4 border-t border-gray-100 dark:border-slate-800">
+            <h3 className={`font-bold text-sm mb-3 ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>Haptic Feedback</h3>
+            
+            <div className="space-y-3">
+              {[
+                { label: 'Scan Capture', checked: hapticScan, set: setHapticScan },
+                { label: 'Export', checked: hapticExport, set: setHapticExport },
+                { label: 'Deletion', checked: hapticDelete, set: setHapticDelete },
+              ].map(item => (
+                <div key={item.label} className="flex items-center justify-between">
+                  <p className={`text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-gray-700'}`}>{item.label}</p>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={item.checked} onChange={e => item.set(e.target.checked)} className="sr-only peer" />
+                    <div className={`w-11 h-6 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:h-5 after:w-5 after:rounded-full after:transition-all ${theme === 'dark' ? 'bg-slate-800 peer-checked:bg-blue-600 after:bg-white' : 'bg-gray-200 peer-checked:bg-blue-600 after:bg-white'}`}></div>
+                  </label>
+                </div>
+              ))}
             </div>
-            <select 
-              value={autoCleanupDays}
-              onChange={(e) => setAutoCleanupDays(parseInt(e.target.value, 10))}
-              className={`border text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500 ${theme === 'dark' ? 'bg-slate-950 border-slate-800 text-white' : 'bg-gray-50 border-gray-200 text-gray-800'}`}
-            >
-              <option value={0} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>Never</option>
-              <option value={7} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>7 days</option>
-              <option value={15} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>15 days</option>
-              <option value={30} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>30 days</option>
-              <option value={90} className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>90 days</option>
-            </select>
           </div>
         </div>
 
@@ -2318,13 +2724,88 @@ const handleMergeSelected = async () => {
 
   // Home View
   return (
-    <div className={`flex flex-col h-screen font-sans relative ${theme === 'dark' ? 'bg-slate-950 text-white' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)]'}`}>
-      <div className={`px-3 py-3 sm:px-6 border-b sticky top-0 z-30 flex items-center justify-between transition-colors duration-300 backdrop-blur-xl ${theme === 'dark' ? 'bg-slate-900/90 border-slate-800 text-white' : 'bg-[var(--color-warm-card)]/90 border-[var(--color-warm-border)] shadow-sm'}`}>
+    <>
+      <AnimatePresence>
+        {showSplash && (
+          <motion.div
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0, scale: 1.05, filter: "blur(12px)" }}
+            transition={{ duration: 0.65, ease: [0.16, 1, 0.3, 1] }}
+            className="fixed inset-0 bg-slate-950 z-[9999] flex flex-col items-center justify-center text-white overflow-hidden"
+          >
+            {/* Glowing ambient radial orbs for depth */}
+            <motion.div 
+              className="absolute w-[450px] h-[450px] rounded-full bg-blue-600/15 blur-[120px]" 
+              animate={{ scale: [1, 1.15, 1], opacity: [0.5, 0.8, 0.5] }} 
+              transition={{ repeat: Infinity, duration: 4, ease: "easeInOut" }} 
+            />
+            <motion.div 
+              className="absolute w-[300px] h-[300px] rounded-full bg-red-500/10 blur-[100px]" 
+              animate={{ scale: [1, 1.25, 1], opacity: [0.3, 0.6, 0.3] }} 
+              transition={{ repeat: Infinity, duration: 5, ease: "easeInOut", delay: 1 }} 
+            />
+
+            <motion.div 
+              initial={{ scale: 0.7, opacity: 0, y: 30 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
+              className="relative z-10 flex flex-col items-center"
+            >
+              {/* Majestic GR7 Logo Container */}
+              <div className="w-36 h-36 relative mb-6 drop-shadow-[0_20px_50px_rgba(12,90,112,0.3)] select-none">
+                {/* Glowing rotating background indicator */}
+                <motion.div 
+                  animate={{ rotate: 360 }}
+                  transition={{ repeat: Infinity, duration: 25, ease: "linear" }}
+                  className="absolute -inset-2.5 rounded-[50px] bg-gradient-to-tr from-[#0c5a70]/40 to-[#e54545]/40 opacity-70 blur-xs"
+                />
+                <svg viewBox="0 0 160 160" className="w-full h-full relative z-10">
+                  <rect x="4" y="4" width="152" height="152" rx="44" fill="#ffffff" stroke="#eef2f6" strokeWidth="8" />
+                  <text x="24" y="105" fontFamily="'Inter', system-ui, sans-serif" fontWeight="900" fontSize="74" fill="#0c5a70" letterSpacing="-2">GR</text>
+                  <text x="105" y="105" fontFamily="'Inter', system-ui, sans-serif" fontWeight="900" fontSize="84" fill="#e54545">7</text>
+                </svg>
+              </div>
+
+              {/* Text elements */}
+              <motion.h1 
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.35, duration: 0.7 }}
+                className="text-2xl font-black tracking-wider text-white uppercase text-center"
+              >
+                GR7 <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-rose-400">Scanner</span>
+              </motion.h1>
+
+              <motion.p 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 0.6 }}
+                transition={{ delay: 0.6, duration: 0.7 }}
+                className="text-xs text-slate-400 font-medium tracking-[0.25em] uppercase mt-2 text-center"
+              >
+                Document & PDF Digitizer
+              </motion.p>
+
+              {/* Loading progress bar */}
+              <div className="w-32 h-1 bg-slate-800 rounded-full mt-12 overflow-hidden relative">
+                <motion.div 
+                  initial={{ left: "-100%" }}
+                  animate={{ left: "100%" }}
+                  transition={{ repeat: Infinity, duration: 1.8, ease: "easeInOut" }}
+                  className="absolute top-0 bottom-0 w-2/3 bg-gradient-to-r from-transparent via-cyan-400 to-transparent"
+                />
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className={`flex flex-col h-[100dvh] font-sans relative ${theme === 'dark' ? 'bg-slate-950 text-white' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)]'}`}>
+      <div className={`px-4 pb-3 sm:px-6 border-b sticky top-0 safe-pt z-30 flex items-center justify-between transition-colors duration-300 backdrop-blur-xl ${theme === 'dark' ? 'bg-slate-900/90 border-slate-800 text-white' : 'bg-[var(--color-warm-card)]/90 border-[var(--color-warm-border)] shadow-sm'}`}>
         {currentTab === 'home' ? (
           isMultiSelect ? (
           <>
             <div className="flex items-center space-x-2 min-w-0">
-              <button onClick={() => { setIsMultiSelect(false); setSelectedDocs(new Set()); }} className={`p-1.5 rounded-lg -ml-1 ${theme === 'dark' ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-[var(--color-warm-text)] hover:text-black hover:bg-[var(--color-warm-border)]'}`}>
+              <button onClick={() => { setIsMultiSelect(false); setSelectedDocs(new Set()); }} className={`touch-target p-1.5 rounded-lg -ml-1 ${theme === 'dark' ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-[var(--color-warm-text)] hover:text-black hover:bg-[var(--color-warm-border)]'}`}>
                 <X className="w-5 h-5" />
               </button>
               <h1 className={`text-base sm:text-lg font-bold truncate ${theme === 'dark' ? 'text-slate-200' : 'text-[var(--color-warm-text)]'}`}>{selectedDocs.size} Selected</h1>
@@ -2362,15 +2843,6 @@ const handleMergeSelected = async () => {
                  <FolderInput className="w-5 h-5" />
               </button>
               {selectedDocs.size > 1 && (
-                <>
-                
-                <button 
-                  onClick={handleDownloadCombinedPDF} 
-                  className={`p-2 rounded-full transition-all ${theme === 'dark' ? 'text-red-400 hover:bg-slate-800' : 'text-red-600 hover:bg-red-100'}`}
-                  title="Download as Combined PDF"
-                >
-                   <FileDown className="w-5 h-5" />
-                </button>
                 <button 
                   onClick={handleMergeSelected} 
                   className={`p-2 rounded-full transition-all ${theme === 'dark' ? 'text-blue-400 hover:bg-slate-800' : 'text-blue-600 hover:bg-blue-100'}`}
@@ -2378,7 +2850,6 @@ const handleMergeSelected = async () => {
                 >
                    <Combine className="w-5 h-5" />
                 </button>
-                </>
               )}
               <button 
                 onClick={handleShareSelected} 
@@ -2412,21 +2883,29 @@ const handleMergeSelected = async () => {
             </div>
             <div className="flex items-center space-x-2 flex-shrink-0">
               {documents.length > 0 && (
-                <div className={`flex rounded-lg p-0.5 ${theme === 'dark' ? 'bg-slate-800' : 'bg-[var(--color-warm-card)] shadow-sm backdrop-blur-md border border-[var(--color-warm-border)]'}`}>
-                   <button onClick={() => setLayout('grid')} className={`p-1 rounded ${layout === 'grid' ? theme === 'dark' ? 'bg-slate-700 text-blue-400 shadow-xs' : 'bg-[var(--color-warm-bg)] shadow-xs text-[var(--color-warm-accent)]' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-text)]'}`}>
+                <div className={`flex rounded-lg p-0.5 border ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-200 shadow-xs'}`}>
+                   <button 
+                     onClick={() => setLayout('grid')} 
+                     className={`w-7 h-7 flex items-center justify-center rounded transition-all ${layout === 'grid' ? (theme === 'dark' ? 'bg-slate-800 text-blue-400' : 'bg-gray-100 text-blue-600') : 'text-gray-400 hover:text-gray-600'}`}
+                     title="Grid View"
+                   >
                       <LayoutGrid className="w-3.5 h-3.5" />
                    </button>
-                   <button onClick={() => setLayout('list')} className={`p-1 rounded ${layout === 'list' ? theme === 'dark' ? 'bg-slate-700 text-blue-400 shadow-xs' : 'bg-[var(--color-warm-bg)] shadow-xs text-[var(--color-warm-accent)]' : 'text-[var(--color-warm-text-muted)] hover:text-[var(--color-warm-text)]'}`}>
+                   <button 
+                     onClick={() => setLayout('list')} 
+                     className={`w-7 h-7 flex items-center justify-center rounded transition-all ${layout === 'list' ? (theme === 'dark' ? 'bg-slate-800 text-blue-400' : 'bg-gray-100 text-blue-600') : 'text-gray-400 hover:text-gray-600'}`}
+                     title="List View"
+                   >
                       <ListIcon className="w-3.5 h-3.5" />
                    </button>
                 </div>
               )}
               <button 
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className={`p-1.5 rounded-full transition-all active:scale-95 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-[var(--color-warm-text-muted)] hover:bg-[var(--color-warm-border)]'}`}
+                className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all active:scale-95 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-yellow-400 hover:bg-slate-800' : 'bg-white border-gray-200 text-gray-750 hover:bg-gray-50 shadow-xs'}`}
                 title={theme === 'light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
               >
-                {theme === 'light' ? <Moon className="w-4.5 h-4.5" /> : <Sun className="w-4.5 h-4.5" />}
+                {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
               </button>
             </div>
           </>
@@ -2437,7 +2916,7 @@ const handleMergeSelected = async () => {
               <h1 className={`text-xl sm:text-2xl font-black tracking-tight ${theme === 'dark' ? 'text-white' : 'text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-indigo-600'}`}>Quick Notes</h1>
               <button 
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className={`p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
+                className={`touch-target p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
                 title="Toggle Theme"
               >
                 {theme === 'light' ? <Moon className="w-4.5 h-4.5" /> : <Sun className="w-4.5 h-4.5" />}
@@ -2464,7 +2943,7 @@ const handleMergeSelected = async () => {
               <h1 className={`text-xl sm:text-2xl font-black tracking-tight ${theme === 'dark' ? 'text-white' : 'text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-indigo-600'}`}>My Profile</h1>
               <button 
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className={`p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
+                className={`touch-target p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
                 title="Toggle Theme"
               >
                 {theme === 'light' ? <Moon className="w-4.5 h-4.5" /> : <Sun className="w-4.5 h-4.5" />}
@@ -2480,7 +2959,7 @@ const handleMergeSelected = async () => {
               <h1 className={`text-xl sm:text-2xl font-black tracking-tight ${theme === 'dark' ? 'text-white' : 'text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-indigo-600'}`}>Settings</h1>
               <button 
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className={`p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
+                className={`touch-target p-1.5 rounded-full transition-all active:scale-95 flex-shrink-0 ${theme === 'dark' ? 'text-yellow-400 hover:bg-slate-800' : 'text-slate-500 hover:bg-blue-100/50'}`}
                 title="Toggle Theme"
               >
                 {theme === 'light' ? <Moon className="w-4.5 h-4.5" /> : <Sun className="w-4.5 h-4.5" />}
@@ -2498,8 +2977,17 @@ const handleMergeSelected = async () => {
         </div>
       )}
       
-      <div className={`flex-1 overflow-y-auto p-4 pb-28 space-y-6 transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-950 text-white' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)]'}`}>
-        {currentTab === 'home' ? (
+      <div className={`flex-1 overflow-y-auto p-4 pb-28 transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-950 text-white' : 'bg-[var(--color-warm-bg)] text-[var(--color-warm-text)]'}`}>
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={currentTab}
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -15 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            className="space-y-6"
+          >
+            {currentTab === 'home' ? (
           documents.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-4 py-20">
              <FileText className="w-16 h-16 text-gray-300 stroke-[1.5]" />
@@ -2508,21 +2996,21 @@ const handleMergeSelected = async () => {
           </div>
         ) : (
           <>
-             {/* Sticky/Smooth Search input bar */}
-             <div className={`w-full max-w-xl mx-auto flex items-center space-x-2 sticky top-0 z-10 py-[2px] backdrop-blur-sm transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-950/95' : 'bg-[var(--color-warm-bg)]/95'}`}>
+             {/* Search input bar */}
+             <div className="w-full max-w-xl mx-auto flex items-center space-x-2 py-2 px-0.5 transition-colors duration-300">
                 <div className="relative flex-1">
-                  <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
                   <input
                     type="text"
                     placeholder="Search documents by title..."
                     value={searchQuery || ''}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-10 py-2 bg-white border border-gray-200 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm transition-all placeholder-gray-400"
+                    className={`w-full pl-9 pr-8 py-1 border rounded-full text-sm transition-all focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-400 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white focus:border-slate-700' : 'bg-white border-gray-200 text-gray-850 focus:border-gray-300 shadow-xs'}`}
                   />
                   {searchQuery && (
                     <button
                       onClick={() => setSearchQuery('')}
-                      className="absolute right-3 top-2.5 p-0.5 text-gray-400 hover:text-gray-600 rounded-full"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600 rounded-full"
                     >
                       <X className="h-4 w-4" />
                     </button>
@@ -2530,25 +3018,26 @@ const handleMergeSelected = async () => {
                 </div>
                 {documents.length > 0 && (
                   <div className="flex items-center space-x-1.5 flex-shrink-0">
-                    <div className={`relative flex items-center group cursor-pointer px-1.5 py-1.5 rounded-full transition-colors ${theme === 'dark' ? 'text-slate-300 bg-slate-800 hover:bg-slate-700' : 'text-[var(--color-warm-text)] bg-[var(--color-warm-card)] shadow-sm hover:bg-[var(--color-warm-border)] border border-[var(--color-warm-border)]'}`}>
-                      <ArrowDownUp className="w-3.5 h-3.5 sm:w-4 sm:h-4 opacity-70 absolute left-2 pointer-events-none" />
+                    <div className={`relative flex items-center h-8 rounded-full border transition-colors cursor-pointer px-4 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800 hover:border-slate-750' : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 shadow-xs'}`}>
+                      <ArrowDownUp className="w-3 h-3 opacity-60 mr-1 pointer-events-none" />
                       <select 
                         value={sortOrder} 
                         onChange={e => setSortOrder(e.target.value as SortOrder)}
-                        className="bg-transparent text-[10px] sm:text-xs font-semibold appearance-none outline-none cursor-pointer pl-6 pr-3 py-0.5"
+                        className="bg-transparent text-[11px] font-medium appearance-none outline-none cursor-pointer pr-3.5 py-0"
                       >
                         <option value="newest" className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>Newest</option>
                         <option value="oldest" className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>Oldest</option>
                         <option value="alpha" className={theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white'}>A-Z</option>
                       </select>
+                      <ChevronDown className="w-3 h-3 opacity-55 absolute right-1.5 pointer-events-none" />
                     </div>
                     <button 
                       onClick={() => setIsMultiSelect(true)} 
-                      className={`flex items-center px-2 py-1.5 sm:px-3 sm:py-2 rounded-full transition-all ${theme === 'dark' ? 'text-blue-400 bg-slate-800 hover:bg-slate-700' : 'text-blue-600 bg-blue-50 border border-blue-100 hover:bg-blue-100 shadow-sm'}`}
+                      className={`flex items-center h-8 px-2 rounded-lg text-[11px] font-medium border transition-all active:scale-95 ${theme === 'dark' ? 'text-blue-400 bg-slate-900 border-slate-800 hover:bg-slate-800' : 'text-blue-600 bg-blue-50 border-blue-100/70 hover:bg-blue-100 shadow-xs'}`}
                       title="Select multiple"
                     >
-                      <CheckSquare className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                      <span className="text-[10px] sm:text-xs font-bold ml-1.5 hidden sm:inline-block">Select</span>
+                      <CheckSquare className="w-3 h-3" />
+                      <span className="ml-1 hidden sm:inline-block">Select</span>
                     </button>
                   </div>
                 )}
@@ -2571,40 +3060,53 @@ const handleMergeSelected = async () => {
                     }}
                     className={`text-xs font-bold flex items-center px-2 py-1 rounded-lg ${theme === 'dark' ? 'text-blue-400 hover:bg-slate-800' : 'text-blue-600 hover:bg-blue-50'}`}
                   >
-                    <Plus className="w-3.5 h-3.5 mr-1" /> Create Folder
+                    <FolderPlus className="w-3.5 h-3.5 mr-1" /> Create Folder
                   </button>
                 </div>
 
-                <div className="flex items-center space-x-1.5 overflow-x-auto pb-1.5 scrollbar-thin">
+                <div className="flex items-center space-x-1.5 overflow-x-auto pb-1.5 hide-scrollbar">
                   <button
                     onClick={() => setActiveFolderFilter('all')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${activeFolderFilter === 'all' ? 'bg-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-800 text-slate-300 hover:bg-slate-750' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-100')}`}
+                    className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all border ${activeFolderFilter === 'all' ? 'bg-blue-600 border-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white text-gray-650 hover:bg-gray-100 border-gray-200')}`}
                   >
                     All ({documents.filter(d => !d.isTrash).length})
                   </button>
                   <button
                     onClick={() => setActiveFolderFilter('root')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${activeFolderFilter === 'root' ? 'bg-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-800 text-slate-300 hover:bg-slate-750' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-100')}`}
+                    className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all border ${activeFolderFilter === 'root' ? 'bg-blue-600 border-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white text-gray-650 hover:bg-gray-100 border-gray-200')}`}
                   >
                     Uncategorized ({documents.filter(d => !d.isTrash && !d.folderId).length})
                   </button>
                   <button
                     onClick={() => setActiveFolderFilter('trash')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all flex items-center ${activeFolderFilter === 'trash' ? 'bg-red-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-800 text-red-400 hover:bg-slate-750' : 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200')}`}
+                    className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all border flex items-center ${activeFolderFilter === 'trash' ? 'bg-red-600 border-red-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-900 border-slate-800 text-red-400 hover:bg-slate-80 border-slate-800' : 'bg-red-50 border-red-200 text-red-750 hover:bg-red-100/70')}`}
                   >
                     <Trash2 className="w-3.5 h-3.5 mr-1" />
                     Trash ({documents.filter(d => d.isTrash).length})
                   </button>
                   {folders.map(folder => {
                     const count = documents.filter(d => !d.isTrash && d.folderId === folder.id).length;
+                    const isActive = activeFolderFilter === folder.id;
                     return (
-                      <div key={folder.id} className="flex items-center shrink-0">
+                      <div 
+                        key={folder.id} 
+                        className={`flex items-center shrink-0 rounded-xl border transition-all text-xs font-semibold whitespace-nowrap overflow-hidden select-none ${
+                          isActive 
+                            ? 'bg-blue-600 border-blue-600 text-white shadow-xs' 
+                            : (theme === 'dark' 
+                                ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-850 hover:border-slate-700' 
+                                : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 hover:border-gray-300 shadow-xs')
+                        }`}
+                      >
                         <button
                           onClick={() => setActiveFolderFilter(folder.id)}
-                          className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all flex items-center ${activeFolderFilter === folder.id ? 'bg-blue-600 text-white shadow-sm' : (theme === 'dark' ? 'bg-slate-800 text-slate-300 hover:bg-slate-750' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-100')}`}
+                          className="px-3 py-1.5 flex items-center h-full focus:outline-none"
                         >
-                          <FolderOpen className="w-3 h-3 mr-1 opacity-70" />
-                          {folder.name} ({count})
+                          <FolderOpen className={`w-3.5 h-3.5 mr-1.5 ${isActive ? 'text-white' : 'text-gray-400'}`} />
+                          <span>{folder.name}</span>
+                          <span className={`ml-1.5 text-[10px] font-bold px-1.5 py-0.25 rounded-full ${isActive ? 'bg-white/20 text-white' : (theme === 'dark' ? 'bg-slate-800 text-slate-400' : 'bg-gray-100 text-gray-500')}`}>
+                            {count}
+                          </span>
                         </button>
                         <button
                           onClick={async (e) => {
@@ -2619,10 +3121,16 @@ const handleMergeSelected = async () => {
                               }
                             }
                           }}
-                          className={`p-1 ml-0.5 rounded-lg hover:text-red-500 transition-colors ${theme === 'dark' ? 'text-slate-500 hover:bg-slate-850' : 'text-gray-400 hover:bg-gray-100'}`}
+                          className={`px-2 py-1.5 h-full border-l flex items-center justify-center transition-colors focus:outline-none ${
+                            isActive 
+                              ? 'border-blue-500/35 hover:bg-blue-700 text-blue-200 hover:text-white' 
+                              : (theme === 'dark' 
+                                  ? 'border-slate-850 hover:bg-slate-800 hover:text-red-400 text-slate-500' 
+                                  : 'border-gray-150 hover:bg-red-50 hover:text-red-600 text-gray-400')
+                          }`}
                           title="Delete folder"
                         >
-                          <Trash2 className="w-3 h-3" />
+                          <X className="w-3 h-3" />
                         </button>
                       </div>
                     );
@@ -2678,7 +3186,7 @@ const handleMergeSelected = async () => {
                    {folderId === 'root' && folders.length > 0 && (
                      <h2 className={`text-lg font-semibold ${theme === 'dark' ? 'text-slate-200' : 'text-[var(--color-warm-text)]'}`}>Uncategorized</h2>
                    )}
-                   <motion.div layout className={layout === 'grid' ? "grid gap-3 grid-cols-3 sm:grid-cols-4 lg:grid-cols-5" : "flex flex-col gap-3"}>
+                   <motion.div layout className={layout === 'grid' ? "grid gap-3 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" : "flex flex-col gap-3"}>
                      <AnimatePresence mode="popLayout">
                      {folderDocs.map(doc => {
                        const isSelected = selectedDocs.has(doc.id);
@@ -2722,7 +3230,7 @@ const handleMergeSelected = async () => {
                             
                             <div className={`rounded overflow-hidden flex-shrink-0 relative ${theme === 'dark' ? 'bg-slate-800 border border-slate-700' : 'bg-white border border-[var(--color-warm-border)]'} ${layout === 'grid' ? 'w-full aspect-[3/4]' : 'w-16 h-20'}`}>
                               {doc.pages[0] && (
-                                <img src={doc.pages[0].filteredImage} alt="" className="w-full h-full object-cover" />
+                                <img src={doc.pages[0].filteredImage} alt="" className="w-full h-full object-cover" loading="lazy" decoding="async" />
                               )}
                               {isMultiSelect && layout === 'grid' && (
                                 <div className="absolute top-1 left-1" onClick={(e) => toggleSelection(doc.id, e)}>
@@ -2748,7 +3256,7 @@ const handleMergeSelected = async () => {
                                       e.stopPropagation();
                                       setActiveMenuDocId(activeMenuDocId === doc.id ? null : doc.id);
                                     }}
-                                    className={`p-1.5 rounded-full transition-colors ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-500 hover:bg-gray-100'}`}
+                                    className={`touch-target p-1.5 rounded-full transition-colors ${theme === 'dark' ? 'text-slate-400 hover:bg-slate-800' : 'text-gray-500 hover:bg-gray-100'}`}
                                   >
                                     <MoreVertical className="w-5 h-5" />
                                   </button>
@@ -2773,9 +3281,51 @@ const handleMergeSelected = async () => {
         ) : (
           renderSettingsTab()
         )}
+          </motion.div>
+        </AnimatePresence>
       </div>
 
       {renderCustomDialogs()}
+
+      {/* APK Help Modal */}
+      {showApkHelp && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowApkHelp(false)} />
+          <div className={`relative w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 ${theme === 'dark' ? 'bg-slate-900 text-white border border-slate-800' : 'bg-white text-gray-800'}`}>
+            <div className="p-6">
+              <div className="flex items-center space-x-3 mb-4">
+                <div className="p-2 bg-blue-100 rounded-xl">
+                  <Info className="w-6 h-6 text-blue-600" />
+                </div>
+                <h2 className="text-xl font-bold">APK Support Help</h2>
+              </div>
+              
+              <div className="space-y-4 text-sm leading-relaxed">
+                <div className="p-3 rounded-xl bg-orange-50 border border-orange-100 text-orange-800">
+                  <p className="font-bold mb-1">Camera not opening?</p>
+                  <p>In your APK settings (Median/GoNative), ensure **Camera Permission** is enabled. Also, check Android app settings for this app.</p>
+                </div>
+                
+                <div className="p-3 rounded-xl bg-blue-50 border border-blue-100 text-blue-800">
+                  <p className="font-bold mb-1">Cannot upload multiple images?</p>
+                  <p>Some Android WebViews limit gallery selection to one image. Try selecting images one by one or enable "Advanced File Uploads" in your APK dashboard.</p>
+                </div>
+
+                <p className={`text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-gray-500'}`}>
+                  This app works perfectly in Chrome/Safari browsers. APK behavior depends on your wrapper configuration.
+                </p>
+              </div>
+
+              <button 
+                onClick={() => setShowApkHelp(false)}
+                className="w-full mt-6 py-3 bg-blue-600 text-white font-bold rounded-2xl active:scale-95 transition-transform"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {renderFullScreenImageOverlay()}
 
@@ -3020,11 +3570,12 @@ const handleMergeSelected = async () => {
       )}
 
       {renderExportModal()}
+      {renderPdfProgressModal()}
 
       {/* Hidden File Inputs */}
       <input 
          type="file" 
-         accept="image/*,application/pdf"
+         accept="image/*"
          multiple
          className="hidden" 
          ref={fileInputGalleryRef}
@@ -3032,7 +3583,7 @@ const handleMergeSelected = async () => {
       />
       <input 
          type="file" 
-         accept="image/*,application/pdf"
+         accept="image/*"
          capture="environment" 
          className="hidden" 
          ref={fileInputCameraRef}
@@ -3043,7 +3594,7 @@ const handleMergeSelected = async () => {
       {renderBatchProgressOverlay()}
 
       {/* Bottom Tab Bar Navigation Footer */}
-      <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-md border-t py-2.5 px-6 flex items-center justify-between z-40 shadow-xl max-w-lg mx-auto sm:rounded-t-2xl transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-900/95 border-slate-800' : 'bg-[var(--color-warm-card)]/95 border-[var(--color-warm-border)]'}`}>
+      <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-md border-t pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] px-6 safe-pl safe-pr flex items-center justify-between z-40 shadow-xl max-w-lg mx-auto sm:rounded-t-2xl transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-900/95 border-slate-800' : 'bg-[var(--color-warm-card)]/95 border-[var(--color-warm-border)]'}`}>
         {/* Home Tab */}
         <button 
           onClick={() => setCurrentTab('home')}
@@ -3067,7 +3618,7 @@ const handleMergeSelected = async () => {
         {/* Scan Core Center Button */}
         <div className="relative -mt-6 flex flex-col items-center justify-center flex-1">
           <button 
-            onClick={() => setShowScanMenu(!showScanMenu)}
+            onClick={() => { triggerHapticLight('scan'); setShowScanMenu(!showScanMenu); }}
             type="button"
             className={`w-14 h-14 rounded-full shadow-lg flex items-center justify-center hover:shadow-xl active:scale-95 transition-all border-4 ${theme === 'dark' ? 'bg-indigo-600 text-white border-slate-900' : 'bg-[var(--color-warm-accent)] text-white border-[var(--color-warm-card)]'}`}
           >
@@ -3084,7 +3635,8 @@ const handleMergeSelected = async () => {
               <div className={`absolute bottom-18 rounded-2xl shadow-2xl p-2.5 w-44 flex flex-col space-y-1 z-40 animate-in slide-in-from-bottom-5 duration-200 border ${theme === 'dark' ? 'bg-slate-800 border-slate-700' : 'bg-[var(--color-warm-card)] border-[var(--color-warm-border)]'}`}>
                 <button 
                   onClick={() => {
-                    fileInputCameraRef.current?.click();
+                    triggerHapticLight('scan');
+                    setCameraMode("single"); setShowCustomCamera(true);
                     setShowScanMenu(false);
                   }}
                   type="button"
@@ -3152,5 +3704,6 @@ const handleMergeSelected = async () => {
         </button>
       </div>
     </div>
+    </>
   );
 }

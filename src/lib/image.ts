@@ -71,7 +71,7 @@ async function getExifOrientation(src: string): Promise<number> {
   }
 }
 
-export async function downscaleImage(src: string, maxDim: number = 2400): Promise<string> {
+export async function downscaleImage(src: string, maxDim: number = 2000): Promise<string> {
   let orientation = -1;
   try {
     orientation = await getExifOrientation(src);
@@ -155,7 +155,7 @@ export async function downscaleImage(src: string, maxDim: number = 2400): Promis
       }
       
       ctx.drawImage(img, 0, 0, width, height);
-      resolve(canvas.toDataURL('image/jpeg', 0.95));
+      resolve(canvas.toDataURL('image/jpeg', 0.8));
     };
     img.onerror = () => reject(new Error("Failed to load image for downscaling"));
     img.src = src;
@@ -239,7 +239,7 @@ export async function warpPerspective(
       const dsize = new cv.Size(dstW, dstH);
       cv.warpPerspective(srcMat, dstMat, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
       cv.imshow(dstCanvas, dstMat);
-      return dstCanvas.toDataURL('image/jpeg', 0.95);
+      return dstCanvas.toDataURL('image/jpeg', 0.9);
     } catch (err) {
       console.warn("OpenCV warpPerspective failed, falling back to pure JS:", err);
     } finally {
@@ -316,7 +316,59 @@ export async function warpPerspective(
   }
   
   dstCtx.putImageData(dstImgData, 0, 0);
-  return dstCanvas.toDataURL('image/jpeg', 0.95);
+  return dstCanvas.toDataURL('image/jpeg', 0.9);
+}
+
+function boxBlur(imageData: ImageData, radius: number) {
+  const data = imageData.data;
+  const width = imageData.width;
+  const height = imageData.height;
+  
+  const temp = new Uint8ClampedArray(data.length);
+  temp.set(data);
+  
+  // Horizontal pass
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let rSum = 0, gSum = 0, bSum = 0, count = 0;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const nx = x + dx;
+        if (nx >= 0 && nx < width) {
+          const idx = (y * width + nx) * 4;
+          rSum += temp[idx];
+          gSum += temp[idx + 1];
+          bSum += temp[idx + 2];
+          count++;
+        }
+      }
+      const destIdx = (y * width + x) * 4;
+      data[destIdx] = Math.round(rSum / count);
+      data[destIdx + 1] = Math.round(gSum / count);
+      data[destIdx + 2] = Math.round(bSum / count);
+    }
+  }
+  
+  // Vertical pass
+  temp.set(data);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let rSum = 0, gSum = 0, bSum = 0, count = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const ny = y + dy;
+        if (ny >= 0 && ny < height) {
+          const idx = (ny * width + x) * 4;
+          rSum += temp[idx];
+          gSum += temp[idx + 1];
+          bSum += temp[idx + 2];
+          count++;
+        }
+      }
+      const destIdx = (y * width + x) * 4;
+      data[destIdx] = Math.round(rSum / count);
+      data[destIdx + 1] = Math.round(gSum / count);
+      data[destIdx + 2] = Math.round(bSum / count);
+    }
+  }
 }
 
 export async function applyFilter(
@@ -336,7 +388,7 @@ export async function applyFilter(
   const br = options.brightness !== undefined ? options.brightness : 100;
   const cr = options.contrast !== undefined ? options.contrast : 100;
 
-  // 1. Rotate the base image
+  // STEP 1: रोटेशन लागू करना (Rotation)
   const rotCanvas = document.createElement('canvas');
   if (rot === 90 || rot === 270) {
     rotCanvas.width = img.height;
@@ -350,7 +402,7 @@ export async function applyFilter(
   rotCtx.rotate((rot * Math.PI) / 180);
   rotCtx.drawImage(img, -img.width / 2, -img.height / 2);
 
-  // 2. Apply Brightness and Contrast
+  // STEP 2: ब्राइटनेस और कॉन्ट्रास्ट लागू करना (Canvas Filter API)
   const adjCanvas = document.createElement('canvas');
   adjCanvas.width = rotCanvas.width;
   adjCanvas.height = rotCanvas.height;
@@ -358,6 +410,7 @@ export async function applyFilter(
   adjCtx.filter = `brightness(${br}%) contrast(${cr}%)`;
   adjCtx.drawImage(rotCanvas, 0, 0);
 
+  // Original फ़िल्टर है तो यहीं से इमेज रिटर्न कर दें
   if (filterType === 'original') {
     return adjCanvas.toDataURL('image/jpeg', 0.95);
   } else if (filterType === 'photo') {
@@ -370,8 +423,8 @@ export async function applyFilter(
     return photoCanvas.toDataURL('image/jpeg', 0.95);
   }
 
-  // 3. Document / BW / Magic Color modes
-  const scale = 0.05; // 5% scale for a VERY broad illumination map
+  // STEP 3: डॉक्यूमेंट / BW / Magic Color के लिए शैडो रिमूवल (Illumination Mapping)
+  const scale = 0.05; // लाइटिंग मैप बनाने के लिए 5% स्केलिंग
   const smallW = Math.max(1, Math.floor(adjCanvas.width * scale));
   const smallH = Math.max(1, Math.floor(adjCanvas.height * scale));
   
@@ -380,10 +433,10 @@ export async function applyFilter(
   smallCanvas.height = smallH;
   const smallCtx = smallCanvas.getContext('2d')!;
   
-  smallCtx.filter = 'blur(4px)'; // roughly 80px blur on original
+  smallCtx.filter = 'blur(4px)'; // धुंधला लाइटिंग मैप
   smallCtx.drawImage(adjCanvas, 0, 0, smallW, smallH);
   
-  // We need the illumination map. Let's just scale it back up.
+  // लाइटिंग मैप को वापस ओरिजिनल साइज़ में स्मूथली बड़ा करना
   const blurCanvas = document.createElement('canvas');
   blurCanvas.width = adjCanvas.width;
   blurCanvas.height = adjCanvas.height;
@@ -394,7 +447,7 @@ export async function applyFilter(
   const illumImageData = blurCtx.getImageData(0, 0, adjCanvas.width, adjCanvas.height);
   const illumData = illumImageData.data;
 
-  // Unsharp mask canvas
+  // Unsharp Mask (शार्पनेस के लिए)
   const usmCanvas = document.createElement('canvas');
   usmCanvas.width = adjCanvas.width;
   usmCanvas.height = adjCanvas.height;
@@ -414,6 +467,7 @@ export async function applyFilter(
   const outImageData = normCtx.createImageData(adjCanvas.width, adjCanvas.height);
   const data = outImageData.data;
 
+  // फ़िल्टर के अनुसार ब्लैक और व्हाइट पॉइंट थ्रेसहोल्ड तय करना
   let blackPoint = 60; 
   let whitePoint = 230; 
   
@@ -427,6 +481,7 @@ export async function applyFilter(
   
   const range = whitePoint - blackPoint;
   
+  // पिक्सेल-बाय-पिक्सेल लूप
   for (let i = 0; i < data.length; i += 4) {
      let r0 = origData[i];
      let g0 = origData[i+1];
@@ -436,7 +491,7 @@ export async function applyFilter(
      let ug = usmData[i+1];
      let ub = usmData[i+2];
 
-     // Apply USM (Sharpening)
+     // 1. Unsharp Mask (शार्पनिंग) फॉर्मूला लगाना
      let sharpenAmount = filterType === 'magic' ? 1.5 : (filterType === 'bw' ? 2.0 : 1.0);
      let r = r0 + (r0 - ur) * sharpenAmount;
      let g = g0 + (g0 - ug) * sharpenAmount;
@@ -450,17 +505,16 @@ export async function applyFilter(
      let ib = illumData[i+2];
      
      let illumLum = ir * 0.299 + ig * 0.587 + ib * 0.114;
-     let origLum = r * 0.299 + g * 0.587 + b * 0.114;
-     let chroma = Math.max(r, g, b) - Math.min(r, g, b);
+     let chroma = Math.max(r, g, b) - Math.min(r, g, b); // रंग का गाढ़ापन (color intensity)
 
-     // Heuristic to detect photos vs background
+     // शैडो हटाने के लिए ब्लेंडिंग फैक्टर
      let illumBlend = (illumLum - 50) / (130 - 50);
-     // Boost blend for low-chroma pixels (gray shadows) to ensure they are flattened
      if (chroma < 20) {
         illumBlend += (20 - chroma) / 40; 
      }
      illumBlend = Math.max(0, Math.min(1, illumBlend));
      
+     // लाइटिंग फैक्टर का पिक्सल पर प्रभाव डालना
      let factorR = (255 / Math.max(ir, 1)) * illumBlend + 1.0 * (1 - illumBlend);
      let factorG = (255 / Math.max(ig, 1)) * illumBlend + 1.0 * (1 - illumBlend);
      let factorB = (255 / Math.max(ib, 1)) * illumBlend + 1.0 * (1 - illumBlend);
@@ -471,7 +525,9 @@ export async function applyFilter(
      
      let lum = dr * 0.299 + dg * 0.587 + db * 0.114;
      
+     // फ़िल्टर्स के अनुसार आउटपुट पिक्सल तय करना
      if (filterType === 'bw') {
+        // Black and White मोड
         let v = 0;
         if (lum < blackPoint) v = 0;
         else if (lum > whitePoint) v = 255;
@@ -482,8 +538,7 @@ export async function applyFilter(
         data[i+2] = v;
         data[i+3] = 255;
      } else if (filterType === 'magic') {
-        // MAGIC FILTER: Preserve colors, whiten background
-        // Colorful pixels (stamps, photos) get protection from aggressive whitening
+        // Magic Mode: बैकग्राउंड को उजला (white) करना और रंगों को सुरक्षा देना ताकि वे फीके न हों
         const protection = Math.min(90, chroma * 3.0);
         const activeWhitePoint = Math.min(255, whitePoint + protection);
         
@@ -503,7 +558,7 @@ export async function applyFilter(
            let s = (lum - adjustedBlackPoint) * 255 / (currentRange || 1);
            s = Math.min(255, Math.max(0, s));
            
-           const satBoost = 1.35;
+           const satBoost = 1.35; // रंगों को वाइब्रेंट रखने के लिए सैचुरेशन बूस्ट
            const ratio = s / (lum || 1);
            
            let nr = (dr * ratio - s) * satBoost + s;
@@ -515,7 +570,8 @@ export async function applyFilter(
            data[i+2] = Math.min(255, Math.max(0, nb * whiteFactor + 255 * (1 - whiteFactor)));
         }
         data[i+3] = 255;
-     } else { // 'document'
+     } else { 
+        // Document Mode
         let s = (lum - blackPoint) * 255 / range;
         s = Math.min(255, Math.max(0, s));
         const ratio = s / (lum || 1);
@@ -664,17 +720,17 @@ function extractBestQuadrilateral(
         let area = cv.contourArea(contour);
 
         // Determine dynamic minimum area ratio based on original input image resolution
-        let minAreaRatio = 0.12; // default 12%
+        let minAreaRatio = 0.10; // default 10%
         if (imgWidth && imgHeight) {
           const originalPixels = imgWidth * imgHeight;
           if (originalPixels > 8000000) {      // > 8 MP (e.g. 12MP, 4K)
-            minAreaRatio = 0.04; // 4% (highly detailed, allow smaller size relative to image)
+            minAreaRatio = 0.03; // 3%
           } else if (originalPixels > 4000000) { // > 4 MP
-            minAreaRatio = 0.06; // 6%
+            minAreaRatio = 0.05; // 5%
           } else if (originalPixels > 2000000) { // > 2 MP
-            minAreaRatio = 0.08; // 8%
+            minAreaRatio = 0.07; // 7%
           } else if (originalPixels > 1000000) { // > 1 MP
-            minAreaRatio = 0.10; // 10%
+            minAreaRatio = 0.08; // 8%
           }
         }
 
@@ -852,14 +908,14 @@ function extractBestQuadrilateral(
   }
 }
 
-function detectDocumentCornersOpenCV(img: HTMLImageElement): Point[] | null {
+function detectDocumentCornersOpenCV(img: HTMLImageElement | HTMLCanvasElement): Point[] | null {
   const cv = (window as any).cv;
   if (!cv || !cv.Mat) {
     console.log("OpenCV.js not loaded yet or unavailable.");
     return null;
   }
 
-  const maxDim = 800;
+  const maxDim = 1200;
   let scale = Math.min(maxDim / img.width, maxDim / img.height);
   if (scale > 1) scale = 1;
   const w = Math.round(img.width * scale);
@@ -1026,7 +1082,7 @@ function detectDocumentCornersOpenCV(img: HTMLImageElement): Point[] | null {
   return null;
 }
 
-export function detectDocumentCorners(img: HTMLImageElement): Point[] | null {
+export function detectDocumentCorners(img: HTMLImageElement | HTMLCanvasElement): Point[] | null {
   // First, attempt to detect using OpenCV.js if loaded and highly confident.
   try {
     const cvCorners = detectDocumentCornersOpenCV(img);
