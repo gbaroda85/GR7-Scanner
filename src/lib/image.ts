@@ -1,7 +1,601 @@
 import { FilterType, Point, WatermarkOptions } from '../types';
 import { distance, getPerspectiveTransform } from './math';
 
+const workerCode = `
+  self.onmessage = function(e) {
+    const { id, type, payload } = e.data;
+    try {
+      if (type === 'detectDocumentCorners') {
+        const { w, h, data, scale, imgWidth, imgHeight } = payload;
+        const corners = runDetection(w, h, data, scale, imgWidth, imgHeight);
+        self.postMessage({ id, result: corners });
+      } else if (type === 'warpPerspective') {
+        const { srcData, corners, dstW, dstH, srcW, srcH } = payload;
+        const resultData = runWarp(srcData, corners, dstW, dstH, srcW, srcH);
+        self.postMessage({ id, result: resultData }, [resultData.buffer]);
+      }
+    } catch(err) {
+      self.postMessage({ id, error: err.message || String(err) });
+    }
+  };
+
+  function runDetection(w, h, data, scale, imgWidth, imgHeight) {
+    // 1. Try white paper segmenter first
+    const whitePaper = detectWhitePaperCorners(w, h, data, scale, imgWidth, imgHeight);
+    if (whitePaper) return whitePaper;
+
+    // 2. Fallback to edge-based corner detection
+    const gray = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+        gray[i] = Math.round(data[i*4]*0.299 + data[i*4+1]*0.587 + data[i*4+2]*0.114);
+    }
+    
+    const blurred1 = new Uint8Array(w * h);
+    const blurred2 = new Uint8Array(w * h);
+    
+    // Pass 1
+    for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+            let sum = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    sum += gray[(y + dy) * w + (x + dx)];
+                }
+            }
+            blurred1[y * w + x] = Math.round(sum / 9);
+        }
+    }
+    // Fill borders for pass 1
+    for (let x = 0; x < w; x++) {
+      blurred1[x] = gray[x];
+      blurred1[(h - 1) * w + x] = gray[(h - 1) * w + x];
+    }
+    for (let y = 0; y < h; y++) {
+      blurred1[y * w] = gray[y * w];
+      blurred1[y * w + w - 1] = gray[y * w + w - 1];
+    }
+
+    // Pass 2
+    for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+            let sum = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    sum += blurred1[(y + dy) * w + (x + dx)];
+                }
+            }
+            blurred2[y * w + x] = Math.round(sum / 9);
+        }
+    }
+    // Fill borders for pass 2
+    for (let x = 0; x < w; x++) {
+      blurred2[x] = blurred1[x];
+      blurred2[(h - 1) * w + x] = blurred1[(h - 1) * w + x];
+    }
+    for (let y = 0; y < h; y++) {
+      blurred2[y * w] = blurred1[y * w];
+      blurred2[y * w + w - 1] = blurred1[y * w + w - 1];
+    }
+
+    const mag = new Float32Array(w * h);
+    for (let y = 2; y < h - 2; y++) {
+        for (let x = 2; x < w - 2; x++) {
+            const idx = y * w + x;
+            const gx = -blurred2[idx - w - 1] + blurred2[idx - w + 1]
+                       -2*blurred2[idx - 1] + 2*blurred2[idx + 1]
+                       -blurred2[idx + w - 1] + blurred2[idx + w + 1];
+            const gy = -blurred2[idx - w - 1] - 2*blurred2[idx - w] - blurred2[idx - w + 1]
+                       +blurred2[idx + w - 1] + 2*blurred2[idx + w] + blurred2[idx + w + 1];
+            mag[idx] = Math.sqrt(gx*gx + gy*gy);
+        }
+    }
+    
+    const marginX = Math.floor(w * 0.05);
+    const marginY = Math.floor(h * 0.05);
+    
+    const hist = new Int32Array(1500);
+    let count = 0;
+    for (let y = marginY; y < h - marginY; y++) {
+        for (let x = marginX; x < w - marginX; x++) {
+            const val = Math.min(1499, Math.floor(mag[y * w + x]));
+            hist[val]++;
+            count++;
+        }
+    }
+    
+    let threshold = 40;
+    let edgePixelCount = 0;
+    const targetCount = count * 0.12;
+    for (let i = 1499; i >= 0; i--) {
+        edgePixelCount += hist[i];
+        if (edgePixelCount >= targetCount) {
+            threshold = Math.max(30, i);
+            break;
+        }
+    }
+    
+    const binary = new Uint8Array(w * h);
+    for (let y = marginY; y < h - marginY; y++) {
+        for (let x = marginX; x < w - marginX; x++) {
+            if (mag[y * w + x] > threshold) {
+                binary[y * w + x] = 1;
+            }
+        }
+    }
+    
+    const visited = new Uint8Array(w * h);
+    const salientPixels = [];
+    
+    for (let i = 0; i < w * h; i++) {
+        if (binary[i] && !visited[i]) {
+            const q = [i];
+            visited[i] = 1;
+            const comp = [];
+            let qIdx = 0;
+            
+            while (qIdx < q.length) {
+                const curr = q[qIdx++];
+                comp.push(curr);
+                
+                const cx = curr % w;
+                const cy = Math.floor(curr / w);
+                
+                for (let dy = -2; dy <= 2; dy++) {
+                    for (let dx = -2; dx <= 2; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const nx = cx + dx;
+                        const ny = cy + dy;
+                        if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                            const nidx = ny * w + nx;
+                            if (binary[nidx] && !visited[nidx]) {
+                                visited[nidx] = 1;
+                                q.push(nidx);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (comp.length >= 30) {
+                for (let j = 0; j < comp.length; j++) {
+                    salientPixels.push(comp[j]);
+                }
+            }
+        }
+    }
+    
+    if (salientPixels.length < (w + h)) {
+        return null;
+    }
+    
+    let tl = { x: 0, y: 0, val: Infinity };
+    let tr = { x: 0, y: 0, val: -Infinity };
+    let br = { x: 0, y: 0, val: -Infinity };
+    let bl = { x: 0, y: 0, val: Infinity };
+    
+    const borderThreshW = w * 0.035;
+    const borderThreshH = h * 0.035;
+    
+    for (let i = 0; i < salientPixels.length; i++) {
+        const x = salientPixels[i] % w;
+        const y = Math.floor(salientPixels[i] / w);
+        
+        if (x <= borderThreshW || x >= w - borderThreshW || y <= borderThreshH || y >= h - borderThreshH) {
+            continue;
+        }
+        
+        const sum = x + y;
+        const diff = x - y;
+        
+        if (sum < tl.val) { tl = { x, y, val: sum }; }
+        if (diff > tr.val) { tr = { x, y, val: diff }; }
+        if (sum > br.val) { br = { x, y, val: sum }; }
+        if (diff < bl.val) { bl = { x, y, val: diff }; }
+    }
+    
+    if (tl.val === Infinity || tr.val === -Infinity || br.val === -Infinity || bl.val === Infinity) {
+        return null;
+    }
+    
+    const scaleBack = 1 / scale;
+    const detectedCorners = [
+      { x: tl.x * scaleBack, y: tl.y * scaleBack },
+      { x: tr.x * scaleBack, y: tr.y * scaleBack },
+      { x: br.x * scaleBack, y: br.y * scaleBack },
+      { x: bl.x * scaleBack, y: bl.y * scaleBack }
+    ];
+
+    if (isValidDocumentQuadrilateral(detectedCorners, imgWidth, imgHeight)) {
+      return detectedCorners;
+    }
+    return null;
+  }
+
+  function detectWhitePaperCorners(w, h, data, scale, imgWidth, imgHeight) {
+    const gray = new Uint8Array(w * h);
+    let maxVal = 0;
+    for (let i = 0; i < w * h; i++) {
+      const r = data[i * 4];
+      const g = data[i * 4 + 1];
+      const b = data[i * 4 + 2];
+      const val = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
+      gray[i] = val;
+      if (val > maxVal) maxVal = val;
+    }
+
+    const blurred = new Uint8Array(w * h);
+    const kSize = 3; 
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let sum = 0;
+        let count = 0;
+        for (let dy = -kSize; dy <= kSize; dy++) {
+          for (let dx = -kSize; dx <= kSize; dx++) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+              sum += gray[ny * w + nx];
+              count++;
+            }
+          }
+        }
+        blurred[y * w + x] = Math.round(sum / count);
+      }
+    }
+
+    const hist = new Int32Array(256);
+    for (let i = 0; i < blurred.length; i++) {
+      hist[blurred[i]]++;
+    }
+    const total = blurred.length;
+    let sum = 0;
+    for (let t = 0; t < 256; t++) {
+      sum += t * hist[t];
+    }
+    let sumB = 0;
+    let wB = 0;
+    let wF = 0;
+    let varMax = 0;
+    let otsu = 0;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t];
+      if (wB === 0) continue;
+      wF = total - wB;
+      if (wF === 0) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB;
+      const mF = (sum - sumB) / wF;
+      const varBetween = wB * wF * (mB - mF) * (mB - mF);
+      if (varBetween > varMax) {
+        varMax = varBetween;
+        otsu = t;
+      }
+    }
+
+    const threshCandidates = [
+      Math.max(60, Math.round(otsu)),
+      Math.max(65, Math.round(otsu * 0.95 + maxVal * 0.05)),
+      Math.max(70, Math.round(otsu * 0.90 + maxVal * 0.10)),
+      Math.max(75, Math.round(otsu * 0.80 + maxVal * 0.20)),
+      Math.max(80, Math.round(otsu * 0.70 + maxVal * 0.30))
+    ];
+
+    for (const paperThresh of threshCandidates) {
+      const paperBinary = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        paperBinary[i] = blurred[i] >= paperThresh ? 1 : 0;
+      }
+
+      const visited = new Uint8Array(w * h);
+      let maxComp = [];
+      
+      for (let i = 0; i < w * h; i++) {
+        if (paperBinary[i] && !visited[i]) {
+          const q = [i];
+          visited[i] = 1;
+          let qIdx = 0;
+          
+          while (qIdx < q.length) {
+            const curr = q[qIdx++];
+            const cx = curr % w;
+            const cy = Math.floor(curr / w);
+            
+            const neighbors = [
+              { x: cx - 1, y: cy },
+              { x: cx + 1, y: cy },
+              { x: cx, y: cy - 1 },
+              { x: cx, y: cy + 1 }
+            ];
+            
+            for (const n of neighbors) {
+              if (n.x >= 0 && n.x < w && n.y >= 0 && n.y < h) {
+                const nidx = n.y * w + n.x;
+                if (paperBinary[nidx] && !visited[nidx]) {
+                  visited[nidx] = 1;
+                  q.push(nidx);
+                }
+              }
+            }
+          }
+          
+          if (q.length > maxComp.length) {
+            maxComp = q;
+          }
+        }
+      }
+
+      if (maxComp.length < w * h * 0.15 || maxComp.length > w * h * 0.95) {
+        continue;
+      }
+
+      let tl = { x: 0, y: 0, val: Infinity };
+      let tr = { x: 0, y: 0, val: -Infinity };
+      let br = { x: 0, y: 0, val: -Infinity };
+      let bl = { x: 0, y: 0, val: Infinity };
+      
+      const borderThreshW = w * 0.035;
+      const borderThreshH = h * 0.035;
+      
+      for (let i = 0; i < maxComp.length; i++) {
+        const idx = maxComp[i];
+        const x = idx % w;
+        const y = Math.floor(idx / w);
+        
+        if (x <= borderThreshW || x >= w - borderThreshW || y <= borderThreshH || y >= h - borderThreshH) {
+          continue;
+        }
+        
+        const sum = x + y;
+        const diff = x - y;
+        
+        if (sum < tl.val) { tl = { x, y, val: sum }; }
+        if (diff > tr.val) { tr = { x, y, val: diff }; }
+        if (sum > br.val) { br = { x, y, val: sum }; }
+        if (diff < bl.val) { bl = { x, y, val: diff }; }
+      }
+
+      if (tl.val === Infinity || tr.val === -Infinity || br.val === -Infinity || bl.val === Infinity) {
+        continue;
+      }
+
+      const scaleBack = 1 / scale;
+      const detectedCorners = [
+        { x: tl.x * scaleBack, y: tl.y * scaleBack },
+        { x: tr.x * scaleBack, y: tr.y * scaleBack },
+        { x: br.x * scaleBack, y: br.y * scaleBack },
+        { x: bl.x * scaleBack, y: bl.y * scaleBack }
+      ];
+
+      if (isValidDocumentQuadrilateral(detectedCorners, imgWidth, imgHeight)) {
+        return detectedCorners;
+      }
+    }
+    return null;
+  }
+
+  function isValidDocumentQuadrilateral(corners, width, height) {
+    if (corners.length !== 4) return false;
+    let area = 0;
+    for (let i = 0; i < 4; i++) {
+      const p1 = corners[i];
+      const p2 = corners[(i + 1) % 4];
+      area += (p1.x * p2.y - p2.x * p1.y);
+    }
+    area = Math.abs(area) * 0.5;
+    const totalArea = width * height;
+    if (area < totalArea * 0.15 || area > totalArea * 0.96) {
+      return false;
+    }
+    if (isImageBorderCorners(corners, width, height)) {
+      return false;
+    }
+    const crossProducts = [];
+    for (let i = 0; i < 4; i++) {
+      const p0 = corners[i];
+      const p1 = corners[(i + 1) % 4];
+      const p2 = corners[(i + 2) % 4];
+      const dx1 = p1.x - p0.x;
+      const dy1 = p1.y - p0.y;
+      const dx2 = p2.x - p1.x;
+      const dy2 = p2.y - p1.y;
+      crossProducts.push(dx1 * dy2 - dy1 * dx2);
+    }
+    const allPositive = crossProducts.every(cp => cp > 1e-5);
+    const allNegative = crossProducts.every(cp => cp < -1e-5);
+    return allPositive || allNegative;
+  }
+
+  function isImageBorderCorners(corners, width, height) {
+    let hits = 0;
+    const threshW = width * 0.02;
+    const threshH = height * 0.02;
+    for (let i = 0; i < corners.length; i++) {
+      const pt = corners[i];
+      const onLeft = pt.x <= threshW;
+      const onRight = pt.x >= width - threshW;
+      const onTop = pt.y <= threshH;
+      const onBottom = pt.y >= height - threshH;
+      if (onLeft || onRight || onTop || onBottom) {
+        hits++;
+      }
+    }
+    return hits >= 3;
+  }
+
+  function distance(p1, p2) {
+    return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+  }
+
+  function getPerspectiveTransform(src, dst) {
+    const a = [];
+    const b = [];
+    for (let i = 0; i < 4; i++) {
+      a.push([src[i].x, src[i].y, 1, 0, 0, 0, -dst[i].x * src[i].x, -dst[i].x * src[i].y]);
+      b.push(dst[i].x);
+      a.push([0, 0, 0, src[i].x, src[i].y, 1, -dst[i].y * src[i].x, -dst[i].y * src[i].y]);
+      b.push(dst[i].y);
+    }
+    const h = solveLinearSystem8x8(a, b);
+    if (!h) return [0,0,0,0,0,0,0,0,1];
+    return [...h, 1];
+  }
+
+  function solveLinearSystem8x8(A, B) {
+    const n = 8;
+    for (let i = 0; i < n; i++) {
+      let maxRow = i;
+      for (let k = i + 1; k < n; k++) {
+        if (Math.abs(A[k][i]) > Math.abs(A[maxRow][i])) {
+          maxRow = k;
+        }
+      }
+      const tempRow = A[i];
+      A[i] = A[maxRow];
+      A[maxRow] = tempRow;
+      const tempVal = B[i];
+      B[i] = B[maxRow];
+      B[maxRow] = tempVal;
+
+      if (Math.abs(A[i][i]) < 1e-12) {
+        return null;
+      }
+
+      for (let k = i + 1; k < n; k++) {
+        const c = -A[k][i] / A[i][i];
+        for (let j = i; j < n; j++) {
+          if (i === j) {
+            A[k][j] = 0;
+          } else {
+            A[k][j] += c * A[i][j];
+          }
+        }
+        B[k] += c * B[i];
+      }
+    }
+
+    const x = new Float32Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      let sum = 0;
+      for (let j = i + 1; j < n; j++) {
+        sum += A[i][j] * x[j];
+      }
+      x[i] = (B[i] - sum) / A[i][i];
+    }
+    return x;
+  }
+
+  function runWarp(srcData, corners, dstW, dstH, srcW, srcH) {
+    const dstBuffer = new ArrayBuffer(dstW * dstH * 4);
+    const dstData32 = new Uint32Array(dstBuffer);
+    const srcData32 = new Uint32Array(srcData.buffer);
+
+    const dstPoints = [
+      { x: 0, y: 0 },
+      { x: dstW, y: 0 },
+      { x: dstW, y: dstH },
+      { x: 0, y: dstH }
+    ];
+
+    const h = getPerspectiveTransform(dstPoints, corners);
+    const [t0, t1, t2, t3, t4, t5, t6, t7, t8] = h;
+
+    if (t0 === 0 && t1 === 0 && t2 === 0 && t3 === 0 && t4 === 0) {
+      return new Uint8ClampedArray(dstBuffer);
+    }
+
+    for (let y = 0; y < dstH; y++) {
+      const y_t1 = t1 * y + t2;
+      const y_t4 = t4 * y + t5;
+      const y_t7 = t7 * y + t8;
+      const y_dstW = y * dstW;
+      
+      for (let x = 0; x < dstW; x++) {
+        const d = t6 * x + y_t7;
+        if (d === 0) continue;
+        
+        const sx = Math.round((t0 * x + y_t1) / d);
+        const sy = Math.round((t3 * x + y_t4) / d);
+        
+        if (sx >= 0 && sx < srcW && sy >= 0 && sy < srcH) {
+          dstData32[y_dstW + x] = srcData32[sy * srcW + sx];
+        }
+      }
+    }
+    return new Uint8ClampedArray(dstBuffer);
+  }
+`;
+
+export class BatchWorkerPool {
+  private static worker: Worker | null = null;
+  private static callbacks = new Map<number, { resolve: (val: any) => void, reject: (err: any) => void }>();
+  private static nextId = 0;
+
+  static getWorker(): Worker {
+    if (!this.worker) {
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      this.worker = new Worker(url);
+      this.worker.onmessage = (e) => {
+        const { id, result, error } = e.data;
+        const cb = this.callbacks.get(id);
+        if (cb) {
+          this.callbacks.delete(id);
+          if (error) cb.reject(new Error(error));
+          else cb.resolve(result);
+        }
+      };
+      this.worker.onerror = (e) => {
+        console.error("Worker error:", e);
+      };
+    }
+    return this.worker;
+  }
+
+  static runDetectCorners(w: number, h: number, data: Uint8ClampedArray, scale: number, imgWidth: number, imgHeight: number): Promise<Point[] | null> {
+    return new Promise((resolve, reject) => {
+      try {
+        const worker = this.getWorker();
+        const id = this.nextId++;
+        this.callbacks.set(id, { resolve, reject });
+        
+        // Transfer data to worker to make it ultra-fast and memory-efficient
+        const transferData = new Uint8ClampedArray(data);
+        worker.postMessage({
+          id,
+          type: 'detectDocumentCorners',
+          payload: { w, h, data: transferData, scale, imgWidth, imgHeight }
+        }, [transferData.buffer]);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  static runWarpPerspective(srcData: Uint8ClampedArray, corners: Point[], dstW: number, dstH: number, srcW: number, srcH: number): Promise<Uint8ClampedArray> {
+    return new Promise((resolve, reject) => {
+      try {
+        const worker = this.getWorker();
+        const id = this.nextId++;
+        this.callbacks.set(id, { resolve, reject });
+        
+        // Clone/transfer data to worker so it doesn't block main thread
+        const transferData = new Uint8ClampedArray(srcData);
+        worker.postMessage({
+          id,
+          type: 'warpPerspective',
+          payload: { srcData: transferData, corners, dstW, dstH, srcW, srcH }
+        }, [transferData.buffer]);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+}
+
 async function getExifOrientation(src: string): Promise<number> {
+  if (src.startsWith('blob:')) {
+    return -1; // Fast-path: browser-generated blob URLs have no EXIF orientation
+  }
   try {
     let arrayBuffer: ArrayBuffer;
     if (src.startsWith('data:')) {
@@ -155,7 +749,13 @@ export async function downscaleImage(src: string, maxDim: number = 2000): Promis
       }
       
       ctx.drawImage(img, 0, 0, width, height);
-      resolve(canvas.toDataURL('image/jpeg', 0.8));
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(URL.createObjectURL(blob));
+        } else {
+          resolve(src);
+        }
+      }, 'image/jpeg', 0.82);
     };
     img.onerror = () => reject(new Error("Failed to load image for downscaling"));
     img.src = src;
@@ -261,62 +861,67 @@ export async function warpPerspective(
     dstCanvas.height = dstH;
   }
 
-  const dstCtx = dstCanvas.getContext('2d')!;
-  
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = img.width;
-  srcCanvas.height = img.height;
-  const srcCtx = srcCanvas.getContext('2d')!;
-  srcCtx.drawImage(img, 0, 0);
-  
-  const srcImgData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
-  const srcData = srcImgData.data;
-  
-  const dstImgData = dstCtx.createImageData(dstW, dstH);
-  const dstData = dstImgData.data;
-  
-  const dstPoints = [
-    { x: 0, y: 0 },
-    { x: dstW, y: 0 },
-    { x: dstW, y: dstH },
-    { x: 0, y: dstH }
-  ];
-  
-  const h = getPerspectiveTransform(dstPoints, corners);
-  const [t0, t1, t2, t3, t4, t5, t6, t7, t8] = h;
-  
-  if (t0 === 0 && t1 === 0 && t2 === 0 && t3 === 0 && t4 === 0) {
-     return imageSrc;
-  }
+  try {
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = img.width;
+    srcCanvas.height = img.height;
+    const srcCtx = srcCanvas.getContext('2d')!;
+    srcCtx.drawImage(img, 0, 0);
+    const srcImgData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
 
-  // Optimize pixel copy with single 32-bit (RGBA) array writes instead of 4 separate byte writes
-  const srcData32 = new Uint32Array(srcData.buffer);
-  const dstData32 = new Uint32Array(dstData.buffer);
-
-  const srcW = srcCanvas.width;
-  const srcH = srcCanvas.height;
-
-  for (let y = 0; y < dstH; y++) {
-    const y_t1 = t1 * y + t2;
-    const y_t4 = t4 * y + t5;
-    const y_t7 = t7 * y + t8;
-    const y_dstW = y * dstW;
+    // Run the expensive perspective warp inside the Web Worker!
+    const resultBuffer = await BatchWorkerPool.runWarpPerspective(srcImgData.data, corners, dstW, dstH, img.width, img.height);
     
-    for (let x = 0; x < dstW; x++) {
-      const d = t6 * x + y_t7;
-      if (d === 0) continue;
-      
-      const sx = Math.round((t0 * x + y_t1) / d);
-      const sy = Math.round((t3 * x + y_t4) / d);
-      
-      if (sx >= 0 && sx < srcW && sy >= 0 && sy < srcH) {
-        dstData32[y_dstW + x] = srcData32[sy * srcW + sx];
+    const dstCtx = dstCanvas.getContext('2d')!;
+    const dstImgData = dstCtx.createImageData(dstW, dstH);
+    dstImgData.data.set(resultBuffer);
+    dstCtx.putImageData(dstImgData, 0, 0);
+    return dstCanvas.toDataURL('image/jpeg', 0.9);
+  } catch (err) {
+    console.error("Worker warpPerspective failed, falling back to synchronous main thread:", err);
+    const dstCtx = dstCanvas.getContext('2d')!;
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = img.width;
+    srcCanvas.height = img.height;
+    const srcCtx = srcCanvas.getContext('2d')!;
+    srcCtx.drawImage(img, 0, 0);
+    const srcImgData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
+    const srcData = srcImgData.data;
+    const dstImgData = dstCtx.createImageData(dstW, dstH);
+    const dstData = dstImgData.data;
+    const dstPoints = [
+      { x: 0, y: 0 },
+      { x: dstW, y: 0 },
+      { x: dstW, y: dstH },
+      { x: 0, y: dstH }
+    ];
+    const h = getPerspectiveTransform(dstPoints, corners);
+    const [t0, t1, t2, t3, t4, t5, t6, t7, t8] = h;
+    if (t0 === 0 && t1 === 0 && t2 === 0 && t3 === 0 && t4 === 0) {
+       return imageSrc;
+    }
+    const srcData32 = new Uint32Array(srcData.buffer);
+    const dstData32 = new Uint32Array(dstData.buffer);
+    const srcW = srcCanvas.width;
+    const srcH = srcCanvas.height;
+    for (let y = 0; y < dstH; y++) {
+      const y_t1 = t1 * y + t2;
+      const y_t4 = t4 * y + t5;
+      const y_t7 = t7 * y + t8;
+      const y_dstW = y * dstW;
+      for (let x = 0; x < dstW; x++) {
+        const d = t6 * x + y_t7;
+        if (d === 0) continue;
+        const sx = Math.round((t0 * x + y_t1) / d);
+        const sy = Math.round((t3 * x + y_t4) / d);
+        if (sx >= 0 && sx < srcW && sy >= 0 && sy < srcH) {
+          dstData32[y_dstW + x] = srcData32[sy * srcW + sx];
+        }
       }
     }
+    dstCtx.putImageData(dstImgData, 0, 0);
+    return dstCanvas.toDataURL('image/jpeg', 0.9);
   }
-  
-  dstCtx.putImageData(dstImgData, 0, 0);
-  return dstCanvas.toDataURL('image/jpeg', 0.9);
 }
 
 function boxBlur(imageData: ImageData, radius: number) {
@@ -1082,6 +1687,42 @@ function detectDocumentCornersOpenCV(img: HTMLImageElement | HTMLCanvasElement):
   return null;
 }
 
+export async function detectDocumentCornersAsync(img: HTMLImageElement | HTMLCanvasElement): Promise<Point[] | null> {
+  // First, attempt to detect using OpenCV.js if loaded and highly confident on main thread.
+  try {
+    const cvCorners = detectDocumentCornersOpenCV(img);
+    if (cvCorners) {
+      return cvCorners;
+    }
+  } catch (err) {
+    console.warn("Failed OpenCV.js detection on main thread, falling back to Web Worker:", err);
+  }
+
+  // Otherwise, run in Web Worker to offload the heavy computations of paper/edge segmentation!
+  const MAX_DIM = 256;
+  let scale = Math.min(MAX_DIM / img.width, MAX_DIM / img.height);
+  if (scale > 1) scale = 1;
+  const w = Math.floor(img.width * scale);
+  const h = Math.floor(img.height * scale);
+  
+  if (!(w > 0) || !(h > 0)) return null;
+  
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(img, 0, 0, w, h);
+  
+  const imgData = ctx.getImageData(0, 0, w, h);
+  
+  try {
+    return await BatchWorkerPool.runDetectCorners(w, h, imgData.data, scale, img.width, img.height);
+  } catch (err) {
+    console.error("Worker detectDocumentCorners failed, running synchronous fallback:", err);
+    return detectDocumentCorners(img); // Fallback to synchronous execution on main thread
+  }
+}
+
 export function detectDocumentCorners(img: HTMLImageElement | HTMLCanvasElement): Point[] | null {
   // First, attempt to detect using OpenCV.js if loaded and highly confident.
   try {
@@ -1588,26 +2229,16 @@ function isValidDocumentQuadrilateral(corners: Point[], width: number, height: n
   return true;
 }
 
-export async function addWatermarkToImage(imageSrc: string, watermark: WatermarkOptions): Promise<string> {
-  const img = await loadImage(imageSrc);
-  const canvas = document.createElement('canvas');
-  canvas.width = img.width;
-  canvas.height = img.height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return imageSrc;
-
-  // Draw original image
-  ctx.drawImage(img, 0, 0);
-
+export function drawWatermarkOnCanvas(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, watermark: WatermarkOptions) {
   if (!watermark || !watermark.text || !watermark.text.trim()) {
-    return canvas.toDataURL('image/jpeg', 0.95);
+    return;
   }
 
   ctx.save();
   ctx.globalAlpha = watermark.opacity ?? 0.3;
   ctx.fillStyle = watermark.color ?? '#cccccc';
   
-  const scaleFactor = Math.max(0.5, img.width / 600); 
+  const scaleFactor = Math.max(0.5, canvas.width / 600); 
   const fontSize = Math.round((watermark.size || 24) * scaleFactor);
   ctx.font = `bold ${fontSize}px sans-serif`;
   ctx.textAlign = 'center';
@@ -1618,8 +2249,8 @@ export async function addWatermarkToImage(imageSrc: string, watermark: Watermark
   if (watermark.style === 'grid') {
     // 3x3 Grid with margin
     const m = watermark.margin || 20;
-    const colWidth = (img.width - 2 * m) / 3;
-    const rowHeight = (img.height - 2 * m) / 3;
+    const colWidth = (canvas.width - 2 * m) / 3;
+    const rowHeight = (canvas.height - 2 * m) / 3;
     for (let r = 0; r < 3; r++) {
       for (let c = 0; c < 3; c++) {
         const x = m + colWidth * c + colWidth / 2;
@@ -1635,8 +2266,8 @@ export async function addWatermarkToImage(imageSrc: string, watermark: Watermark
     // Single position with margin
     const pos = watermark.position || 'center';
     const m = watermark.margin || 20;
-    let x = img.width / 2;
-    let y = img.height / 2;
+    let x = canvas.width / 2;
+    let y = canvas.height / 2;
     let rotateAngle = (watermark.rotation ?? 0) * Math.PI / 180;
 
     if (pos === 'top-left') {
@@ -1644,16 +2275,16 @@ export async function addWatermarkToImage(imageSrc: string, watermark: Watermark
       y = m + fontSize;
       ctx.textAlign = 'left';
     } else if (pos === 'top-right') {
-      x = img.width - m - fontSize;
+      x = canvas.width - m - fontSize;
       y = m + fontSize;
       ctx.textAlign = 'right';
     } else if (pos === 'bottom-left') {
       x = m + fontSize;
-      y = img.height - m - fontSize;
+      y = canvas.height - m - fontSize;
       ctx.textAlign = 'left';
     } else if (pos === 'bottom-right') {
-      x = img.width - m - fontSize;
-      y = img.height - m - fontSize;
+      x = canvas.width - m - fontSize;
+      y = canvas.height - m - fontSize;
       ctx.textAlign = 'right';
     }
 
@@ -1665,6 +2296,26 @@ export async function addWatermarkToImage(imageSrc: string, watermark: Watermark
   }
 
   ctx.restore();
-  return canvas.toDataURL('image/jpeg', 0.95);
+}
+
+export async function addWatermarkToImage(imageSrc: string, watermark: WatermarkOptions): Promise<string> {
+  const img = await loadImage(imageSrc);
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return imageSrc;
+
+  // Draw original image
+  ctx.drawImage(img, 0, 0);
+
+  drawWatermarkOnCanvas(canvas, ctx, watermark);
+
+  try {
+    return canvas.toDataURL('image/jpeg', 0.95);
+  } catch (e) {
+    console.warn("Canvas tainted when adding watermark, returning original image", e);
+    return imageSrc;
+  }
 }
 

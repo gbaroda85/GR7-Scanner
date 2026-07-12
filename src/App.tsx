@@ -32,7 +32,7 @@ import { getDocuments, saveDocument, deleteDocument, getFolders, saveFolder, del
 import { Document, DocumentPage, Point, FilterType, Folder, QueueItem, WatermarkOptions } from './types';
 import CropView from './components/CropView';
 import FilterView from './components/FilterView';
-import { warpPerspective, downscaleImage, detectDocumentCorners, applyFilter, loadImage, addWatermarkToImage } from './lib/image';
+import { warpPerspective, downscaleImage, detectDocumentCorners, detectDocumentCornersAsync, applyFilter, loadImage, addWatermarkToImage } from './lib/image';
 import { generatePDF } from './lib/pdf';
 import JSZip from 'jszip';
 
@@ -909,7 +909,7 @@ export default function App() {
             y: pt.y * img.height
           }));
         } else {
-          corners = detectDocumentCorners(img);
+          corners = await detectDocumentCornersAsync(img);
         }
         
         // If detection fails, provide default corners (10% margin) so the page is still processed

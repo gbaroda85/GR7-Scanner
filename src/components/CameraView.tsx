@@ -64,11 +64,9 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
   
   const [flashEnabled, setFlashEnabled] = useState(false);
   const [flashSupported, setFlashSupported] = useState(false);
-  const [autoCapture, setAutoCapture] = useState(true);
   const [zoom, setZoom] = useState<number>(1);
   const [capturedImages, setCapturedImages] = useState<File[]>([]);
   const [showSettings, setShowSettings] = useState(false);
-  const [isAutoCapturePaused, setIsAutoCapturePaused] = useState(false);
   const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
   
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -79,6 +77,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
   
   const stableCountRef = useRef(0);
   const isCapturingRef = useRef(false);
+  const firstSteadyTimeRef = useRef<number | null>(null);
 
   // Corner stabilization references
   const lastDrawnCornersRef = useRef<Point[] | null>(null);
@@ -318,11 +317,46 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
           smoothedCorners = mappedCorners;
         }
         
+        // Calculate corner displacement to check for hand shake / movement stability
+        let maxMove = 999;
+        const hasPrev = lastDrawnCornersRef.current && lastDrawnCornersRef.current.length === 4;
+        if (hasPrev && smoothedCorners.length === 4) {
+          maxMove = 0;
+          for (let i = 0; i < 4; i++) {
+            const prev = lastDrawnCornersRef.current![i];
+            const curr = smoothedCorners[i];
+            const dist = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+            if (dist > maxMove) {
+              maxMove = dist;
+            }
+          }
+        }
+
         lastDrawnCornersRef.current = smoothedCorners;
+
+        // Auto capture trigger logic based on stabilized frames
+        // We only consider the alignment "steady" if the corners have stopped moving (maxMove < 3.5 pixels)
+        const isSteady = hasPrev && maxMove < 3.5;
         
+        if (isSteady) {
+          if (firstSteadyTimeRef.current === null) {
+            firstSteadyTimeRef.current = Date.now();
+          }
+        } else {
+          firstSteadyTimeRef.current = null;
+        }
+
+        const steadyElapsed = firstSteadyTimeRef.current ? Date.now() - firstSteadyTimeRef.current : 0;
+        const stabilityProgress = steadyElapsed > 0 ? Math.min(1, steadyElapsed / 1600) : 0;
+
         // Render the ultra-smooth, premium translucent outline
-        ctx.strokeStyle = 'rgba(59, 130, 246, 0.95)';
-        ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
+        // Visual indicator: transition to a beautiful emerald green outline when the user holds it steady
+        ctx.strokeStyle = isSteady && steadyElapsed > 150
+          ? `rgba(16, 185, 129, ${0.75 + stabilityProgress * 0.25})` // Emerald green
+          : 'rgba(59, 130, 246, 0.95)'; // Blue
+        ctx.fillStyle = isSteady && steadyElapsed > 150
+          ? `rgba(16, 185, 129, ${0.12 + stabilityProgress * 0.08})`
+          : 'rgba(59, 130, 246, 0.15)';
         ctx.lineWidth = 6;
         ctx.lineJoin = 'round';
         ctx.beginPath();
@@ -336,7 +370,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
         
         // Accent anchor dots on corners
         ctx.fillStyle = '#ffffff';
-        ctx.strokeStyle = '#2563eb';
+        ctx.strokeStyle = isSteady && steadyElapsed > 150 ? '#10b981' : '#2563eb';
         ctx.lineWidth = 4;
         smoothedCorners.forEach(pt => {
           ctx.beginPath();
@@ -344,17 +378,27 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
           ctx.fill();
           ctx.stroke();
         });
-        
-        // Auto capture trigger logic based on stabilized frames
-        if (autoCapture && !isCapturingRef.current && !isAutoCapturePaused) {
-          stableCountRef.current += 1;
-          if (stableCountRef.current > 24) { // ~0.8s of stable, clean tracking
-            performCapture(smoothedCorners);
-            stableCountRef.current = 0;
-          }
+
+        // Visual feedback text to let the user know the alignment is locked and steady
+        if (isSteady && steadyElapsed > 300) {
+          const centerX = (smoothedCorners[0].x + smoothedCorners[1].x + smoothedCorners[2].x + smoothedCorners[3].x) / 4;
+          const centerY = (smoothedCorners[0].y + smoothedCorners[1].y + smoothedCorners[2].y + smoothedCorners[3].y) / 4;
+          ctx.save();
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+          ctx.beginPath();
+          ctx.arc(centerX, centerY, 30, 0, 2 * Math.PI);
+          ctx.fill();
+          
+          ctx.fillStyle = '#10b981';
+          ctx.font = 'bold 10px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('STEADY', centerX, centerY);
+          ctx.restore();
         }
       } else {
         stableCountRef.current = 0;
+        firstSteadyTimeRef.current = null; // Reset steady timer
         nonDetectedFramesRef.current += 1;
         
         // Temporal Hysteresis (flicker prevention):
@@ -381,7 +425,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
     }
     
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [autoCapture, mode, isAutoCapturePaused]);
+  }, [mode]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -393,10 +437,6 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
       return () => video.removeEventListener('play', handlePlay);
     }
   }, [processFrame]);
-
-  useEffect(() => {
-    setIsAutoCapturePaused(false);
-  }, [mode]);
 
   // Execute shutter capture
   const performCapture = async (corners?: Point[]) => {
@@ -443,8 +483,9 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
       } else {
         // Batch mode: add to stack
         setCapturedImages(prev => [...prev, file]);
-        setIsAutoCapturePaused(true);
         setIsProcessingPhoto(false);
+        firstSteadyTimeRef.current = null;
+        stableCountRef.current = 0;
         setTimeout(() => {
           isCapturingRef.current = false;
         }, 850);
@@ -582,20 +623,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
         </button>
         
         <div className="flex items-center space-x-5">
-          {/* Clear Scanner styled Auto-Capture button */}
-          <button 
-            onClick={() => setAutoCapture(!autoCapture)} 
-            className="touch-target p-2 flex items-center justify-center transition-transform active:scale-90"
-            title="Auto Capture Toggle"
-          >
-            <div className="relative">
-              <Camera className={`w-6 h-6 ${autoCapture ? 'text-blue-400' : 'text-white/60'}`} />
-              <div className={`absolute inset-0 flex items-center justify-center text-[8px] font-black leading-none translate-y-0.5 ${autoCapture ? 'text-blue-400' : 'text-white/60'}`}>
-                A
-              </div>
-            </div>
-          </button>
-          
+
           {/* Flash Switcher */}
           {flashSupported ? (
             <button 
@@ -638,27 +666,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
           className="absolute inset-0 w-full h-full object-cover pointer-events-none transition-transform duration-200 ease-out z-10"
         />
 
-        {isAutoCapturePaused && mode === 'batch' && (
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-[1px] flex flex-col items-center justify-center z-30 p-6">
-            <div className="bg-blue-500/20 border border-blue-400/30 p-4 rounded-full mb-3 animate-pulse">
-              <Check className="w-10 h-10 text-blue-400 stroke-[3]" />
-            </div>
-            <h3 className="text-white text-lg font-black tracking-tight mb-1">Page Scanned!</h3>
-            <p className="text-gray-300 text-xs text-center max-w-xs mb-6 leading-relaxed">
-              Auto-capture is paused so you can turn the page. Click the button below to scan the next page.
-            </p>
-            <button
-              onClick={() => {
-                setIsAutoCapturePaused(false);
-                stableCountRef.current = 0;
-                lastDrawnCornersRef.current = null;
-              }}
-              className="touch-target bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-xs px-6 py-3 rounded-full shadow-lg shadow-blue-900/30 transition-all cursor-pointer flex items-center space-x-2"
-            >
-              <span>Scan Next Page (Auto)</span>
-            </button>
-          </div>
-        )}
+
 
         {/* Clear Scanner styled ID Card Guide Overlay */}
         {mode === 'idcard' && (
@@ -801,13 +809,7 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
           {/* Middle Action: Shutter Button */}
           <button 
             onClick={() => {
-              if (isAutoCapturePaused) {
-                setIsAutoCapturePaused(false);
-                stableCountRef.current = 0;
-                lastDrawnCornersRef.current = null;
-              } else {
-                performCapture(lastDrawnCornersRef.current || undefined);
-              }
+              performCapture(lastDrawnCornersRef.current || undefined);
             }}
             className="w-20 h-20 rounded-full border-4 border-white/40 flex items-center justify-center p-1 active:scale-90 transition-transform hover:border-white/60 bg-transparent"
           >
