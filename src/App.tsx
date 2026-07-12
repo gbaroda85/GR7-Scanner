@@ -948,22 +948,36 @@ export default function App() {
     if (Capacitor.isNativePlatform()) {
       try {
         const base64Data = await blobToBase64(blob);
-        const savedFile = await Filesystem.writeFile({
-          path: filename,
-          data: base64Data,
-          directory: Directory.Documents,
-        });
+        let savedFile;
+        try {
+          // Attempt saving to Documents first (which might work on some configurations)
+          savedFile = await Filesystem.writeFile({
+            path: filename,
+            data: base64Data,
+            directory: Directory.Documents,
+          });
+          
+          showCustomAlert(`File saved to Documents: ${filename}`);
+        } catch (docErr) {
+          console.warn("Saving to Documents failed, falling back to Cache directory", docErr);
+          // Fallback to writing to Cache, which never fails due to permissions!
+          savedFile = await Filesystem.writeFile({
+            path: filename,
+            data: base64Data,
+            directory: Directory.Cache,
+          });
+          
+          showCustomAlert("फ़ाइल तैयार है! इसे फ़ोन में सेव करने के लिए नीचे 'Save to Files' या 'Copy to' चुनें।\n\nFile is ready! Please choose 'Save to Files' or 'Copy to...' below to save it.");
+        }
         
-        showCustomAlert(`File saved to Documents: ${filename}`);
-        
-        // Optionally offer to share it immediately since Android users expect that
+        // Offer to share/save to device via the native Android system share dialog
         await Share.share({
           title: filename,
           url: savedFile.uri,
         });
       } catch (err) {
-        console.error("Native save failed", err);
-        showCustomAlert("Failed to save file natively.");
+        console.error("Native save and share failed", err);
+        showCustomAlert("Failed to save file natively. Please check your storage permissions.");
       }
       return;
     }

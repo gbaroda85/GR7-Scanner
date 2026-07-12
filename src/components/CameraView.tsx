@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Zap, ZapOff, Image as ImageIcon, Check, Camera, Settings, Info } from 'lucide-react';
 import { detectDocumentCorners } from '../lib/image';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
+import { Capacitor } from '@capacitor/core';
+import { Camera as CapCamera } from '@capacitor/camera';
+import { Device } from '@capacitor/device';
 
 interface Point {
   x: number;
@@ -83,45 +86,97 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
   const lastDetectedCornersRef = useRef<Point[] | null>(null);
 
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [deviceInfo, setDeviceInfo] = useState<{ model: string; os: string; platform: string } | null>(null);
 
-  // Initialize camera
+  // Fetch device information on mount
   useEffect(() => {
-    const startCamera = async () => {
+    const fetchDeviceInfo = async () => {
       try {
-        setCameraError(null);
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: 'environment',
-            width: { ideal: 4096 },
-            height: { ideal: 3072 }
-          },
-          audio: false
+        const info = await Device.getInfo();
+        setDeviceInfo({
+          model: info.model || 'Unknown Device',
+          os: info.operatingSystem || 'Unknown OS',
+          platform: info.platform || 'web'
         });
-        
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-        
-        const track = stream.getVideoTracks()[0];
-        trackRef.current = track;
-        
-        const capabilities = track.getCapabilities ? track.getCapabilities() : {};
-        if ((capabilities as any).torch) {
-          setFlashSupported(true);
-        }
-      } catch (err: any) {
-        console.error("Camera access failed", err);
-        let msg = "Camera access denied or not supported.";
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          msg = "Camera permission denied. Please allow camera access in your app settings.";
-        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-          msg = "No camera hardware found on this device.";
-        }
-        setCameraError(msg);
+      } catch (e) {
+        console.warn("Failed to get device info", e);
       }
     };
-    
+    fetchDeviceInfo();
+  }, []);
+
+  // Initialize camera function
+  const startCamera = useCallback(async () => {
+    try {
+      setCameraError(null);
+
+      // 1. Check and request permissions natively if on a Native platform
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const status = await CapCamera.checkPermissions();
+          console.log("Native camera permission status:", status);
+          if (status.camera !== 'granted') {
+            const reqStatus = await CapCamera.requestPermissions({ permissions: ['camera'] });
+            console.log("Native camera permission request result:", reqStatus);
+            if (reqStatus.camera !== 'granted') {
+              throw new Error('PermissionDenied');
+            }
+          }
+        } catch (capErr: any) {
+          if (capErr.message === 'PermissionDenied') {
+            throw capErr;
+          }
+          console.warn("Capacitor permission check/request failed, trying legacy Android bridging", capErr);
+          if (typeof window !== 'undefined' && (window as any).Android && (window as any).Android.requestCameraPermission) {
+            (window as any).Android.requestCameraPermission();
+            await new Promise(r => setTimeout(r, 600));
+          }
+        }
+      }
+
+      // 2. Clean up any existing stream before initiating a new one
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+      }
+
+      // 3. Request video stream
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 4096 },
+          height: { ideal: 3072 }
+        },
+        audio: false
+      });
+      
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+      
+      const track = stream.getVideoTracks()[0];
+      trackRef.current = track;
+      
+      const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+      if ((capabilities as any).torch) {
+        setFlashSupported(true);
+      }
+    } catch (err: any) {
+      console.error("Camera access failed", err);
+      let msg = "Camera permission denied. Please allow camera access in your app settings.";
+      if (err.message === 'PermissionDenied') {
+        msg = "Camera permission was denied. To scan documents, you must grant Camera access.";
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        msg = "No camera hardware found on this device.";
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        msg = "Camera is already in use by another application.";
+      }
+      setCameraError(msg);
+    }
+  }, []);
+
+  // Initialize camera on mount
+  useEffect(() => {
     startCamera();
     
     return () => {
@@ -132,7 +187,23 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [onClose, onFallback]);
+  }, [startCamera]);
+
+  // Handle visibility changes or window focus (e.g. returning from App Settings)
+  useEffect(() => {
+    const handleFocusOrVisible = () => {
+      if (document.visibilityState === 'visible' && cameraError) {
+        console.log("App resumed/focused and camera was in error state. Retrying camera...");
+        startCamera();
+      }
+    };
+    window.addEventListener('focus', handleFocusOrVisible);
+    document.addEventListener('visibilitychange', handleFocusOrVisible);
+    return () => {
+      window.removeEventListener('focus', handleFocusOrVisible);
+      document.removeEventListener('visibilitychange', handleFocusOrVisible);
+    };
+  }, [cameraError, startCamera]);
 
   // Flash management
   useEffect(() => {
@@ -438,19 +509,33 @@ export default function CameraView({ onCapture, onClose, onFallback, onPickGalle
             <X className="w-12 h-12 text-red-500" />
           </div>
           <h3 className="text-white text-xl font-bold mb-2">Camera Access Failed</h3>
-          <p className="text-gray-400 text-sm mb-6 leading-relaxed">
-            {cameraError}
+          <p className="text-gray-300 text-xs mb-6 leading-relaxed space-y-2">
+            <span>{cameraError}</span>
             <br /><br />
-            If you are using this as an Android APK, please ensure you have granted <strong>Camera Permissions</strong>.
+            {deviceInfo && (
+              <span className="block p-2 rounded-lg bg-slate-900/60 font-mono text-[10px] text-gray-400 border border-slate-800/50">
+                Device: {deviceInfo.model} ({deviceInfo.os} - {deviceInfo.platform})
+              </span>
+            )}
+            <br />
+            <span className="block p-3 rounded-xl bg-slate-800/80 text-left text-[11px] border border-slate-700/50">
+              <strong>💡 Settings Guide:</strong> Go to Phone Settings &gt; Apps &gt; select this Scanner App &gt; Permissions &gt; set <strong>Camera</strong> to <strong>"Allow Only While Using the App"</strong>.
+            </span>
+            <br />
+            <span className="block font-medium text-emerald-400">
+              या फिर आप सीधे अपने फोन का सिस्टम कैमरा भी इस्तेमाल कर सकते हैं (कोई परमिशन की ज़रूरत नहीं)!
+            </span>
           </p>
           <div className="flex flex-col w-full gap-3 max-w-xs">
             <button 
-              onClick={() => {
-                if (typeof window !== 'undefined' && (window as any).Android && (window as any).Android.requestCameraPermission) {
-                  (window as any).Android.requestCameraPermission();
-                } else {
-                  window.location.reload();
-                }
+              onClick={onFallback}
+              className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold active:scale-95 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/35 hover:bg-indigo-700"
+            >
+              <Camera className="w-5 h-5 animate-pulse" /> Use System Camera (Bypass)
+            </button>
+            <button 
+              onClick={async () => {
+                await startCamera();
               }}
               className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold active:scale-95 transition-transform"
             >
